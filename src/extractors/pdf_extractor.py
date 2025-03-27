@@ -149,3 +149,144 @@ class PDFExtractor:
                         potential_headings.append(heading)
         
         return potential_headings
+    
+    def extract_sections(self):
+        """
+        Extract the document's sections based on headings.
+        
+        Returns:
+            dict: Dictionary of sections with their text content
+                {section_title: section_text}
+        """
+        if not self.document:
+            success = self.load_document()
+            if not success:
+                return {}
+        
+        # Get structured text and headings
+        structured_pages = self.extract_structured_text()
+        potential_headings = self.identify_potential_headings(structured_pages)
+        
+        # Sort headings by page and vertical position (y-coordinate)
+        sorted_headings = sorted(potential_headings, 
+                                key=lambda h: (h["page"], h["bbox"][1]))
+        
+        sections = {}
+        
+        # If no headings were found, treat the entire document as one section
+        if not sorted_headings:
+            sections["Document"] = self.extract_text()
+            return sections
+        
+        # Process each heading and extract the text until the next heading
+        for i in range(len(sorted_headings)):
+            current_heading = sorted_headings[i]
+            heading_text = current_heading["text"].strip()
+            
+            # Skip if heading is empty or just whitespace
+            if not heading_text:
+                continue
+            
+            # Determine the range of text to extract
+            start_page = current_heading["page"]
+            start_y = current_heading["bbox"][3]  # Bottom of the heading
+            
+            # If this is the last heading, extract until the end of the document
+            if i == len(sorted_headings) - 1:
+                end_page = len(self.document) - 1
+                end_y = float('inf')
+            else:
+                # Otherwise, extract until the next heading
+                next_heading = sorted_headings[i + 1]
+                end_page = next_heading["page"]
+                end_y = next_heading["bbox"][1]  # Top of the next heading
+            
+            # Extract the text for this section
+            section_text = ""
+            
+            for page_num in range(start_page, end_page + 1):
+                page = self.document[page_num]
+                
+                # For the starting page, only get text below the heading
+                if page_num == start_page:
+                    # We use a custom dictionary extraction and filter by position
+                    blocks = page.get_text("dict")["blocks"]
+                    for block in blocks:
+                        if "lines" in block:
+                            for line in block["lines"]:
+                                # Check if the line is below the heading
+                                if line["bbox"][1] >= start_y:
+                                    for span in line["spans"]:
+                                        section_text += span["text"] + " "
+                                    section_text += "\n"
+                
+                # For the ending page, only get text above the next heading
+                elif page_num == end_page and end_y != float('inf'):
+                    blocks = page.get_text("dict")["blocks"]
+                    for block in blocks:
+                        if "lines" in block:
+                            for line in block["lines"]:
+                                # Check if the line is above the next heading
+                                if line["bbox"][3] <= end_y:
+                                    for span in line["spans"]:
+                                        section_text += span["text"] + " "
+                                    section_text += "\n"
+                
+                # For pages in between, get all text
+                else:
+                    section_text += page.get_text()
+            
+            sections[heading_text] = section_text.strip()
+        
+        return sections
+    
+    def get_document_structure(self):
+        """
+        Get the complete structure of the document including metadata, sections, and potential figures.
+        
+        Returns:
+            dict: Document structure with metadata and content
+        """
+        if not self.document:
+            success = self.load_document()
+            if not success:
+                return {}
+        
+        # Get basic metadata
+        metadata = {
+            "title": self.document.metadata.get("title", ""),
+            "author": self.document.metadata.get("author", ""),
+            "subject": self.document.metadata.get("subject", ""),
+            "keywords": self.document.metadata.get("keywords", ""),
+            "page_count": len(self.document),
+            "file_path": self.pdf_path
+        }
+        
+        # Get sections
+        sections = self.extract_sections()
+        
+        # Basic detection of potential figures (areas with images or dense graphics)
+        potential_figures = []
+        for page_num in range(len(self.document)):
+            page = self.document[page_num]
+            img_list = page.get_images()
+            
+            for img in img_list:
+                xref = img[0]  # Image reference number
+                try:
+                    base_image = self.document.extract_image(xref)
+                    if base_image:
+                        potential_figures.append({
+                            "page": page_num,
+                            "xref": xref,
+                            "bbox": page.get_image_bbox(xref)
+                        })
+                except Exception:
+                    # Some images might be problematic to extract
+                    pass
+        
+        return {
+            "metadata": metadata,
+            "sections": sections,
+            "potential_figures": potential_figures
+        }
