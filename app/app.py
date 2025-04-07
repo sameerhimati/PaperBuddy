@@ -1,4 +1,3 @@
-# app/app.py
 import streamlit as st
 import os
 import tempfile
@@ -6,8 +5,14 @@ import uuid
 from pathlib import Path
 import sys
 
+# Set environment variables
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 # Add the parent directory to the path to import from src
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(parent_dir)
+
+# Import after setting path
 from src.extractors import PDFExtractor, TerminologyExtractor, SectionScorer
 
 # Set page configuration
