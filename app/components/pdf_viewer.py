@@ -31,7 +31,7 @@ def highlight_terminology(text, terminology):
     
     return highlighted_text
 
-def display_interactive_text(sections, terminology, section_scores):
+def display_interactive_text(sections, terminology, section_scores, section_confidence=None):
     """Display text with interactive features"""
     # Get list of sections sorted by importance
     sorted_sections = sorted(
@@ -49,7 +49,19 @@ def display_interactive_text(sections, terminology, section_scores):
     )
     
     # Display selected section with highlighted terminology
-    st.subheader(selected_section)
+    if section_confidence and selected_section in section_confidence:
+        conf_score = section_confidence[selected_section]
+        st.subheader(f"{selected_section} (Confidence: {conf_score:.2f})")
+        
+        # Add confidence indicator
+        if conf_score >= 0.8:
+            st.success("High confidence extraction")
+        elif conf_score >= 0.6:
+            st.info("Medium confidence extraction")
+        else:
+            st.warning("Low confidence extraction - may need review")
+    else:
+        st.subheader(selected_section)
     
     # Calculate color for importance
     score = section_scores[selected_section]['score']
@@ -82,5 +94,12 @@ def display_interactive_text(sections, terminology, section_scores):
     # Display expandable definitions
     for term in section_terms:
         definition = terminology.get('definitions', {}).get(term, "No definition available")
-        with st.sidebar.expander(term):
+        term_confidence = terminology.get('term_confidence', {}).get(term, None)
+        
+        # Show confidence if available
+        term_display = term
+        if term_confidence is not None:
+            term_display = f"{term} (Conf: {term_confidence:.2f})"
+            
+        with st.sidebar.expander(term_display):
             st.write(definition)

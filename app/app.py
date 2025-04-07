@@ -63,20 +63,39 @@ def upload_page():
         
         # Display options for processing
         st.subheader("Processing Options")
-        extract_sections = st.checkbox("Extract Paper Sections", value=True)
-        identify_terminology = st.checkbox("Identify Key Terminology", value=True)
-        score_sections = st.checkbox("Score Section Importance", value=True)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Extraction Options**")
+            extract_sections = st.checkbox("Extract Paper Sections", value=True)
+            identify_terminology = st.checkbox("Identify Key Terminology", value=True)
+            score_sections = st.checkbox("Score Section Importance", value=True)
+        
+        with col2:
+            st.write("**Advanced Options**")
+            use_llm = st.checkbox("Use LLM for Enhanced Extraction", value=True)
+            llm_model = st.selectbox(
+                "Select LLM Model:",
+                ["google/gemma-3-4b-it", "google/gemma-3-1b-it", "google/gemma-3-12b-it"],
+                disabled=not use_llm
+            )
         
         # Process the PDF
         if st.button("Process Paper"):
             with st.spinner("Processing paper..."):
                 try:
+                    # Update session state with model choice
+                    st.session_state['llm_model'] = llm_model if use_llm else None
+                    
                     # Process based on selected options
                     results = process_paper(
                         str(file_path), 
                         extract_sections, 
                         identify_terminology, 
-                        score_sections
+                        score_sections,
+                        use_llm=use_llm,
+                        llm_model=llm_model if use_llm else None
                     )
                     
                     # Store the results in session state
@@ -87,8 +106,10 @@ def upload_page():
                     st.markdown("Go to the **Paper Analysis** page to view the results.")
                 except Exception as e:
                     st.error(f"Error processing paper: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
 
-def process_paper(pdf_path, extract_sections=True, identify_terminology=True, score_sections=True, use_llm=True):
+def process_paper(pdf_path, extract_sections=True, identify_terminology=True, score_sections=True, use_llm=False, llm_model=None):
     """Process the paper based on selected options"""
     results = {'pdf_path': pdf_path}
     
@@ -106,8 +127,8 @@ def process_paper(pdf_path, extract_sections=True, identify_terminology=True, sc
     # Use LLM for enhanced extraction if selected
     if use_llm:
         try:
-            from src.extractors.llm_extractor import LLMExtractor
-            llm = LLMExtractor()
+            from src.extractors import LLMExtractor
+            llm = LLMExtractor(model_name=llm_model or "google/gemma-3-4b-it")
             
             # If traditional section extraction failed or produced poor results
             if extract_sections and (not sections or len(sections) <= 2):
@@ -131,6 +152,8 @@ def process_paper(pdf_path, extract_sections=True, identify_terminology=True, sc
                 
         except Exception as e:
             st.warning(f"LLM extraction failed, falling back to traditional methods: {str(e)}")
+            import traceback
+            st.warning(traceback.format_exc())
     
     # Extract terminology using traditional method if not done by LLM
     if identify_terminology and sections:
@@ -185,6 +208,7 @@ def analysis_page():
     # Tab 1: Interactive Paper View with PDF
     with tab1:
         sections = document_structure.get('sections', {})
+        section_confidence = document_structure.get('section_confidence', {})
         terminology = results.get('terminology', {'terms': [], 'definitions': {}})
         
         # Convert section scores to correct format for the viewer
@@ -205,8 +229,13 @@ def analysis_page():
         with col2:
             st.subheader("Section Content")
             if sections and section_scores:
+                # Check if we have confidence data from LLM
+                has_confidence = len(section_confidence) > 0
+                if has_confidence:
+                    st.info("Content extracted with AI assistance. Confidence scores are shown for each section.")
+                
                 from components.pdf_viewer import display_interactive_text
-                display_interactive_text(sections, terminology, section_scores)
+                display_interactive_text(sections, terminology, section_scores, section_confidence if has_confidence else None)
             else:
                 st.info("Section data not available for interactive view.")
     
