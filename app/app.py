@@ -88,7 +88,7 @@ def upload_page():
                 except Exception as e:
                     st.error(f"Error processing paper: {str(e)}")
 
-def process_paper(pdf_path, extract_sections=True, identify_terminology=True, score_sections=True):
+def process_paper(pdf_path, extract_sections=True, identify_terminology=True, score_sections=True, use_llm=True):
     """Process the paper based on selected options"""
     results = {'pdf_path': pdf_path}
     
@@ -100,7 +100,39 @@ def process_paper(pdf_path, extract_sections=True, identify_terminology=True, sc
     # Get sections
     sections = document_structure.get('sections', {})
     
-    # Extract terminology if selected
+    # Extract full text for LLM processing
+    full_text = extractor.extract_text()
+    
+    # Use LLM for enhanced extraction if selected
+    if use_llm:
+        try:
+            from src.extractors.llm_extractor import LLMExtractor
+            llm = LLMExtractor()
+            
+            # If traditional section extraction failed or produced poor results
+            if extract_sections and (not sections or len(sections) <= 2):
+                llm_sections_result = llm.extract_sections(full_text)
+                llm_sections = llm_sections_result.get("sections", {})
+                section_confidence = llm_sections_result.get("section_confidence", {})
+                
+                if llm_sections:
+                    # Replace with LLM-extracted sections
+                    document_structure['sections'] = llm_sections
+                    document_structure['section_confidence'] = section_confidence
+                    sections = llm_sections
+                    results['document_structure'] = document_structure
+            
+            # Extract terminology with LLM if selected
+            if identify_terminology:
+                terminology_result = llm.extract_terminology(full_text)
+                results['terminology'] = terminology_result
+                # Skip traditional terminology extraction
+                identify_terminology = False
+                
+        except Exception as e:
+            st.warning(f"LLM extraction failed, falling back to traditional methods: {str(e)}")
+    
+    # Extract terminology using traditional method if not done by LLM
     if identify_terminology and sections:
         # Combine all text for terminology extraction
         all_text = " ".join(sections.values())
@@ -148,19 +180,35 @@ def analysis_page():
     st.write(f"**Pages:** {metadata.get('page_count', 0)}")
     
     # Tabs for different analysis views
-    tab1, tab2, tab3 = st.tabs(["Paper Sections", "Terminology", "Section Importance"])
+    tab1, tab2, tab3 = st.tabs(["Interactive Paper View", "Terminology", "Section Importance"])
     
-    # Tab 1: Paper Sections
+    # Tab 1: Interactive Paper View with PDF
     with tab1:
         sections = document_structure.get('sections', {})
-        if sections:
-            st.subheader("Paper Sections")
-            section_titles = list(sections.keys())
-            selected_section = st.selectbox("Select a section to view:", section_titles)
-            st.markdown(f"### {selected_section}")
-            st.markdown(sections[selected_section])
-        else:
-            st.info("No sections were extracted from this paper.")
+        terminology = results.get('terminology', {'terms': [], 'definitions': {}})
+        
+        # Convert section scores to correct format for the viewer
+        section_scores = {}
+        if 'section_scores' in results:
+            for section, score_info in results['section_scores'].items():
+                section_scores[section] = score_info
+        
+        # Use two columns for PDF and interactive content
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.subheader("PDF Document")
+            pdf_path = results['pdf_path']
+            from components.pdf_viewer import render_pdf
+            render_pdf(pdf_path)
+        
+        with col2:
+            st.subheader("Section Content")
+            if sections and section_scores:
+                from components.pdf_viewer import display_interactive_text
+                display_interactive_text(sections, terminology, section_scores)
+            else:
+                st.info("Section data not available for interactive view.")
     
     # Tab 2: Terminology
     with tab2:
