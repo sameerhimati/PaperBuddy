@@ -3,6 +3,8 @@ import json
 import tempfile
 from typing import Dict, List, Any, Optional
 import torch
+import os
+from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
 class LLMExtractor:
@@ -18,21 +20,29 @@ class LLMExtractor:
         Args:
             model_name (str): HuggingFace model name (default: google/gemma-3-4b-it)
         """
+
+        load_dotenv()
+        self.hf_token = os.getenv("HUGGINGFACE_TOKEN")
+
+        
         self.model_name = model_name
         self.tokenizer = None
         self.model = None
         self.max_length = 2048  # Maximum context length for most models
         
     def _load_model(self):
-        """Load the model if not already loaded"""
         if self.tokenizer is None or self.model is None:
             try:
-                self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-                self.model = AutoModelForCausalLM.from_pretrained(
+                self.tokenizer = AutoTokenizer.from_pretrained(
                     self.model_name, 
-                    torch_dtype=torch.float16,  # Use float16 for efficiency
+                    token=self.hf_token
+                )
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    token=self.hf_token,
+                    torch_dtype=torch.float16,
                     low_cpu_mem_usage=True,
-                    device_map="auto"  # Automatically place on GPU if available
+                    device_map="auto"
                 )
             except Exception as e:
                 print(f"Error loading model: {e}")
