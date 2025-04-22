@@ -7,16 +7,16 @@ load_dotenv()
 # Google API Keys
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Model configurations
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-2.5-flash-preview-04-17")  # Cost-effective default
-ALTERNATE_MODEL = os.getenv("ALTERNATE_MODEL", "gemini-2.0-flash")  # Stable alternative
-PRO_MODEL = os.getenv("PRO_MODEL", "gemini-2.5-pro-preview-03-25")  # High intelligence option
-FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "gemini-1.5-flash")  # Stable fallback
+# Model configurations - Using confirmed working models
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini-2.5-flash-preview-04-17")  # Newest Flash model
+ALTERNATE_MODEL = os.getenv("ALTERNATE_MODEL", "gemini-2.0-flash")  # Good balance model
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "gemini-1.5-flash")  # Most stable model
+PRO_MODEL = os.getenv("PRO_MODEL", "gemini-2.5-flash-preview-04-17")  # Using best Flash model since Pro requires payment
 
 # Default model selection
 MODEL_TIER = os.getenv("MODEL_TIER", "default").lower()
 
-# Auto-upgrade to pro settings
+# Auto-upgrade to pro settings (using our best Flash model instead)
 AUTO_UPGRADE_TO_PRO = os.getenv("AUTO_UPGRADE_TO_PRO", "False").lower() == "true"
 COMPLEXITY_THRESHOLD = float(os.getenv("COMPLEXITY_THRESHOLD", "0.7"))  # 0-1 scale for complexity detection
 

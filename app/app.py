@@ -2,6 +2,8 @@ import streamlit as st
 import tempfile
 import time
 import os
+import json
+from datetime import datetime
 from PIL import Image
 import io
 
@@ -14,7 +16,7 @@ from utils.display import (
     display_paper_metadata, 
     display_analysis_results
 )
-from config import ACTIVE_MODEL, DEBUG
+from config import ACTIVE_MODEL, DEFAULT_MODEL, ALTERNATE_MODEL, PRO_MODEL, FALLBACK_MODEL, DEBUG
 
 # Set page configuration
 st.set_page_config(
@@ -41,6 +43,8 @@ if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
 if 'analysis_type' not in st.session_state:
     st.session_state.analysis_type = "comprehensive"
+if 'show_all_sections' not in st.session_state:
+    st.session_state.show_all_sections = False
 
 # Sidebar for input options
 with st.sidebar:
@@ -109,8 +113,30 @@ with st.sidebar:
             }.get(x, x)
         )
         
-        force_pro = st.checkbox("Force Pro Model", value=False, 
-                              help="Use the more powerful Pro model even if it's not automatically selected")
+        # Add model selector
+        model_choice = st.selectbox(
+            "Select Model",
+            ["Default", "Pro", "Alternate", "Fallback"],
+            help="Choose which Gemini model to use for analysis"
+        )
+        
+        force_pro = False
+        if model_choice == "Pro":
+            force_pro = True
+            st.info(f"Using model: {PRO_MODEL}")
+        elif model_choice == "Alternate":
+            st.info(f"Using model: {ALTERNATE_MODEL}")
+        elif model_choice == "Fallback":
+            st.info(f"Using model: {FALLBACK_MODEL}")
+        else:
+            st.info(f"Using model: {DEFAULT_MODEL}")
+        
+        # Display all sections option
+        st.session_state.show_all_sections = st.checkbox(
+            "Expand All Sections", 
+            value=st.session_state.show_all_sections,
+            help="Show all sections of the analysis expanded"
+        )
         
         if st.button("Analyze Paper"):
             progress_text, progress_bar = display_progress_bar()
@@ -126,9 +152,15 @@ with st.sidebar:
                     force_pro
                 )
                 
-                progress_text.text("Analysis complete!")
-                progress_bar.progress(1.0)
-                
+                # Check if we got an error from the API call
+                if "error" in st.session_state.analysis_results:
+                    progress_text.empty()
+                    progress_bar.empty()
+                    st.error(f"Error analyzing paper: {st.session_state.analysis_results['error']}")
+                else:
+                    progress_text.text("Analysis complete!")
+                    progress_bar.progress(1.0)
+                    
             except Exception as e:
                 progress_text.empty()
                 progress_bar.empty()
@@ -151,14 +183,37 @@ if st.session_state.paper_metadata is not None:
     if st.session_state.analysis_results is not None:
         st.markdown("---")
         st.header("Analysis Results")
-        display_analysis_results(st.session_state.analysis_results)
+        
+        # Add a download button for the analysis results
+        if "raw_analysis" in st.session_state.analysis_results:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            paper_title = st.session_state.paper_metadata.get('title', 'paper').replace(" ", "_")[:30]
+            filename = f"{paper_title}_{timestamp}_analysis.md"
+            
+            analysis_text = st.session_state.analysis_results.get("raw_analysis", "")
+            
+            # Create download button
+            st.download_button(
+                label="📥 Download Analysis",
+                data=analysis_text,
+                file_name=filename,
+                mime="text/markdown",
+            )
+        
+        display_analysis_results(st.session_state.analysis_results, expand_all=st.session_state.show_all_sections)
 
 # Debug information
 if DEBUG:
     with st.expander("Debug Information", expanded=False):
         st.write("Active Model:", ACTIVE_MODEL)
         st.write("Session State Keys:", list(st.session_state.keys()))
+        
         if st.session_state.paper_metadata:
             st.write("Paper Metadata:", st.session_state.paper_metadata)
+        
         if st.session_state.paper_images:
             st.write("Number of Pages:", len(st.session_state.paper_images))
+            
+        if st.session_state.analysis_results:
+            if st.checkbox("Show Raw Analysis Results"):
+                st.json(st.session_state.analysis_results)

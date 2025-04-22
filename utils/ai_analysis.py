@@ -1,9 +1,8 @@
+import time
+from typing import List, Dict, Any, Optional
 from google import genai
 from PIL import Image
-from typing import List, Dict, Any, Optional
-import time
-import json
-import re
+import io
 from config import (
     GOOGLE_API_KEY, 
     ACTIVE_MODEL,
@@ -18,24 +17,8 @@ from config import (
 )
 from utils.prompts import get_prompt
 
-# Configure the Gemini API
+# Create the Google AI client
 client = genai.Client(api_key=GOOGLE_API_KEY)
-
-def initialize_gemini_model(model_name=None):
-    """Initialize and return the Gemini model."""
-    try:
-        model = genai.GenerativeModel(
-            model_name=model_name or ACTIVE_MODEL,
-            generation_config={
-                "max_output_tokens": MAX_OUTPUT_TOKENS,
-                "temperature": TEMPERATURE,
-                "top_p": TOP_P,
-                "top_k": TOP_K,
-            }
-        )
-        return model
-    except Exception as e:
-        raise Exception(f"Error initializing Gemini model: {str(e)}")
 
 def detect_paper_complexity(metadata: Dict[str, Any], page_images: List[Image.Image]) -> float:
     """
@@ -103,10 +86,9 @@ def analyze_paper_with_gemini(
                 
         # Select model based on complexity determination
         model_to_use = PRO_MODEL if use_pro else ACTIVE_MODEL
-        model = initialize_gemini_model(model_to_use)
         
         # Get appropriate prompt based on analysis type
-        prompt = get_prompt(analysis_type, metadata)
+        prompt_text = get_prompt(analysis_type, metadata)
         
         # Select number of pages based on model and paper length
         max_pages = min(15, len(page_images))  # Default
@@ -117,22 +99,74 @@ def analyze_paper_with_gemini(
         
         selected_images = page_images[:max_pages]
         
-        # Create content list with text prompt and images
-        content = [prompt]
+        # Prepare content for the API
+        contents = []
+        
+        # First add the text prompt
+        contents.append(prompt_text)
+        
+        # Then add each image
         for img in selected_images:
-            content.append(img)
+            # Convert PIL image to bytes
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='PNG')
+            img_bytes = img_byte_arr.getvalue()
+            
+            # Add image to contents
+            contents.append({
+                "mime_type": "image/png",
+                "data": img_bytes
+            })
         
-        # Generate analysis
-        response = client.models.generate_content(response, analysis_type, model_to_use)
+        # Set up generation parameters
+        generation_config = {
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "temperature": TEMPERATURE,
+            "top_p": TOP_P,
+            "top_k": TOP_K,
+        }
         
-        # Process response
-        result = client.models.generate_content(response, analysis_type, model_to_use)
+        # Generate content using the current API
+        response = client.models.generate_content(
+            model=model_to_use,
+            contents=contents,
+            generation_config=generation_config
+        )
+        
+        # Process the response
+        result = {
+            "raw_analysis": response.text,
+            "analysis_type": analysis_type,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "model_used": model_to_use,
+        }
+        
+        # For comprehensive analysis, extract structured sections
+        if analysis_type == "comprehensive":
+            # Extract sections from the response text
+            analysis_text = response.text
+            summary = extract_section(analysis_text, "SUMMARY", "KEY INNOVATIONS")
+            innovations = extract_section(analysis_text, "KEY INNOVATIONS", "TECHNIQUES")
+            techniques = extract_section(analysis_text, "TECHNIQUES", "PRACTICAL VALUE")
+            practical = extract_section(analysis_text, "PRACTICAL VALUE", "LIMITATIONS")
+            limitations = extract_section(analysis_text, "LIMITATIONS", None)
+            
+            # Add structured data if available
+            if summary:
+                result["summary"] = summary
+            if innovations:
+                result["key_innovations"] = innovations
+            if techniques:
+                result["techniques"] = techniques
+            if practical:
+                result["practical_value"] = practical
+            if limitations:
+                result["limitations"] = limitations
         
         # Add processing metadata
         result["processing_time"] = time.time() - start_time
         result["pages_analyzed"] = len(selected_images)
         result["total_pages"] = len(page_images)
-        result["model_used"] = model_to_use
         
         if AUTO_UPGRADE_TO_PRO:
             result["paper_complexity"] = metadata.get("estimated_complexity", 0)
@@ -148,3 +182,32 @@ def analyze_paper_with_gemini(
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "processing_time": time.time() - start_time
         }
+
+def extract_section(text: str, section_start: str, section_end: Optional[str]) -> str:
+    """Extract a section from the text between section_start and section_end."""
+    try:
+        start_idx = text.find(section_start)
+        if start_idx == -1:
+            return ""
+        
+        # Move past the section header
+        start_idx = text.find("\n", start_idx)
+        if start_idx == -1:
+            return ""
+        
+        # Find the end of the section
+        if section_end:
+            end_idx = text.find(section_end, start_idx)
+            if end_idx == -1:
+                # If end marker not found, take until the end
+                section_text = text[start_idx:].strip()
+            else:
+                section_text = text[start_idx:end_idx].strip()
+        else:
+            # If no end marker, take until the end
+            section_text = text[start_idx:].strip()
+            
+        return section_text
+    
+    except Exception:
+        return ""

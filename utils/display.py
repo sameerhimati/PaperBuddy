@@ -72,12 +72,13 @@ def display_paper_metadata(metadata: Dict[str, Any]):
         with st.expander("Abstract", expanded=False):
             st.markdown(metadata['abstract'])
 
-def display_analysis_results(results: Dict[str, Any]):
+def display_analysis_results(results: Dict[str, Any], expand_all: bool = False):
     """
     Display analysis results from AI in a structured format.
     
     Args:
         results: Analysis results dictionary
+        expand_all: Whether to expand all sections by default
     """
     if 'error' in results:
         st.error(f"Error in analysis: {results['error']}")
@@ -89,33 +90,33 @@ def display_analysis_results(results: Dict[str, Any]):
     
     # Display summary if available
     if 'summary' in results:
-        st.subheader("Summary")
-        st.markdown(results['summary'])
+        with st.expander("Summary", expanded=expand_all):
+            st.markdown(results['summary'])
     
     # Display innovations if available
     if 'key_innovations' in results:
-        st.subheader("Key Innovations")
-        st.markdown(results['key_innovations'])
+        with st.expander("Key Innovations", expanded=expand_all):
+            st.markdown(results['key_innovations'])
     
     # Display techniques if available
     if 'techniques' in results:
-        st.subheader("Techniques")
-        st.markdown(results['techniques'])
+        with st.expander("Techniques", expanded=expand_all):
+            st.markdown(results['techniques'])
     
     # Display practical value if available
     if 'practical_value' in results:
-        st.subheader("Practical Value")
-        st.markdown(results['practical_value'])
+        with st.expander("Practical Value", expanded=expand_all):
+            st.markdown(results['practical_value'])
     
     # Display limitations if available
     if 'limitations' in results:
-        st.subheader("Limitations")
-        st.markdown(results['limitations'])
+        with st.expander("Limitations", expanded=expand_all):
+            st.markdown(results['limitations'])
     
     # If structured data isn't available, display raw analysis
     if 'raw_analysis' in results and not any(k in results for k in ['summary', 'key_innovations', 'techniques', 'practical_value']):
-        st.subheader("Analysis")
-        st.markdown(results['raw_analysis'])
+        with st.expander("Complete Analysis", expanded=True):
+            st.markdown(results['raw_analysis'])
     
     # Display processing metadata
     with st.expander("Processing Details", expanded=False):
