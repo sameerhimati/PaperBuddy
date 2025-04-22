@@ -6,6 +6,8 @@ import json
 from datetime import datetime
 from PIL import Image
 import io
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import utility modules
 from utils.paper_import import load_pdf_from_path, load_pdf_from_arxiv, load_pdf_from_url

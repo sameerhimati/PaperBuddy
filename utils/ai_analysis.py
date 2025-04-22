@@ -1,6 +1,7 @@
 import time
 from typing import List, Dict, Any, Optional
 from google import genai
+from google.genai import types
 from PIL import Image
 import io
 from config import (
@@ -119,18 +120,18 @@ def analyze_paper_with_gemini(
             })
         
         # Set up generation parameters
-        generation_config = {
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "temperature": TEMPERATURE,
-            "top_p": TOP_P,
-            "top_k": TOP_K,
-        }
-        
+        generation_config = types.GenerateContentConfig(
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            top_k=TOP_K
+        )
+
         # Generate content using the current API
         response = client.models.generate_content(
             model=model_to_use,
             contents=contents,
-            generation_config=generation_config
+            config = generation_config
         )
         
         # Process the response
