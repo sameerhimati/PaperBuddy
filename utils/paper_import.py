@@ -65,30 +65,33 @@ def load_pdf_from_arxiv(arxiv_id: str) -> Tuple[List[Image.Image], Dict]:
         search = arxiv.Search(id_list=[base_id])
         paper = next(search.results())
         
-        # Create a temporary file to save the PDF
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-            paper.download_pdf(tmp.name)
-            tmp_path = tmp.name
+        # Create a temporary directory to save the PDF
+        temp_dir = tempfile.mkdtemp()
+        safe_title = paper.title.replace(' ', '_').replace('/', '_')
+        pdf_path = os.path.join(temp_dir, f"{base_id}.pdf")
+        
+        # Download the PDF
+        paper.download_pdf(filename=pdf_path)
         
         # Load the PDF
-        page_images, file_metadata = load_pdf_from_path(tmp_path)
+        page_images, file_metadata = load_pdf_from_path(pdf_path)
         
         # Add arXiv metadata
         metadata = {
             "title": paper.title,
-            "author": ', '.join(paper.authors),
+            "author": ', '.join(author.name for author in paper.authors),
             "abstract": paper.summary,
             "url": paper.pdf_url,
-            "published": paper.published.strftime("%Y-%m-%d"),
+            "published": paper.published.strftime("%Y-%m-%d") if paper.published else "Unknown",
             "arxiv_id": arxiv_id,
             "page_count": file_metadata["page_count"]
         }
         
-        # Clean up the temporary file
-        os.unlink(tmp_path)
+        # Clean up the temporary files
+        os.remove(pdf_path)
+        os.rmdir(temp_dir)
         
         return page_images, metadata
-        
     except Exception as e:
         raise Exception(f"Error loading PDF from arXiv: {str(e)}")
 

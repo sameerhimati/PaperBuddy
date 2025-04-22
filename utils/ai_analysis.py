@@ -295,7 +295,15 @@ def extract_section(text: str, section_start: str, section_end: Optional[str]) -
         else:
             # If no end marker, take until the end
             section_text = text[start_idx:].strip()
-            
+        
+        # Clean up section text - remove any lines that look like section numbering
+        lines = section_text.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            if not line.strip().startswith('**') and not (line.strip().startswith('*') and len(line.strip()) < 5):
+                cleaned_lines.append(line)
+        
+        section_text = '\n'.join(cleaned_lines).strip()
         return section_text
     
     except Exception:

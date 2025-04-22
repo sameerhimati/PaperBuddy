@@ -178,7 +178,7 @@ if st.session_state.paper_metadata is not None:
             st.image(
                 st.session_state.paper_images[0], 
                 caption=f"First page of {st.session_state.paper_metadata.get('title', 'paper')}",
-                use_column_width=True
+                use_container_width=True
             )
     
     # Display analysis results if available
