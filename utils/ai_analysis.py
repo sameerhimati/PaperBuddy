@@ -4,6 +4,7 @@ from google import genai
 from google.genai import types
 from PIL import Image
 import io
+import logging
 from config import (
     GOOGLE_API_KEY, 
     ACTIVE_MODEL,
@@ -17,6 +18,10 @@ from config import (
     TOP_K
 )
 from utils.prompts import get_prompt
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Create the Google AI client
 client = genai.Client(api_key=GOOGLE_API_KEY)
@@ -57,7 +62,8 @@ def analyze_paper_with_gemini(
     page_images: List[Image.Image], 
     metadata: Dict[str, Any],
     analysis_type: str = "comprehensive",
-    force_pro: bool = False
+    force_pro: bool = False,
+    pdf_bytes: Optional[bytes] = None
 ) -> Dict[str, Any]:
     """
     Analyze a paper using Google's Gemini model with adaptive model selection.
@@ -67,6 +73,7 @@ def analyze_paper_with_gemini(
         metadata: Paper metadata dictionary
         analysis_type: Type of analysis to perform
         force_pro: Whether to force using the Pro model
+        pdf_bytes: Raw PDF bytes for direct PDF processing (if available)
         
     Returns:
         Dictionary containing analysis results
@@ -91,34 +98,6 @@ def analyze_paper_with_gemini(
         # Get appropriate prompt based on analysis type
         prompt_text = get_prompt(analysis_type, metadata)
         
-        # Select number of pages based on model and paper length
-        max_pages = min(15, len(page_images))  # Default
-        
-        if "pro" in model_to_use:
-            # Pro models can handle more pages
-            max_pages = min(20, len(page_images))
-        
-        selected_images = page_images[:max_pages]
-        
-        # Prepare content for the API
-        contents = []
-        
-        # First add the text prompt
-        contents.append(prompt_text)
-        
-        # Then add each image
-        for img in selected_images:
-            # Convert PIL image to bytes
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='PNG')
-            img_bytes = img_byte_arr.getvalue()
-            
-            # Add image to contents
-            contents.append({
-                "mime_type": "image/png",
-                "data": img_bytes
-            })
-        
         # Set up generation parameters
         generation_config = types.GenerateContentConfig(
             max_output_tokens=MAX_OUTPUT_TOKENS,
@@ -126,13 +105,114 @@ def analyze_paper_with_gemini(
             top_p=TOP_P,
             top_k=TOP_K
         )
-
-        # Generate content using the current API
-        response = client.models.generate_content(
-            model=model_to_use,
-            contents=contents,
-            config = generation_config
-        )
+        
+        # Prepare content for the API
+        contents = []
+        processing_method = "unknown"
+        
+        # First add the text prompt
+        contents.append(prompt_text)
+        
+        # Try direct PDF processing if PDF bytes are available
+        if pdf_bytes is not None:
+            try:
+                logger.info("Attempting to process document as PDF")
+                # Add PDF as a Part using from_bytes method
+                contents.append(
+                    types.Part.from_bytes(
+                        data=pdf_bytes,
+                        mime_type="application/pdf"
+                    )
+                )
+                
+                # Generate content using the PDF
+                response = client.models.generate_content(
+                    model=model_to_use,
+                    contents=contents,
+                    config=generation_config
+                )
+                
+                processing_method = "direct_pdf"
+                logger.info("Successfully processed document as PDF")
+                
+            except Exception as e:
+                # If PDF processing fails, log the error and fall back to image-based approach
+                logger.warning(f"PDF processing failed: {str(e)}. Falling back to image-based approach.")
+                
+                # Reset contents for image-based approach
+                contents = [prompt_text]
+                
+                # Select number of pages based on model and paper length
+                max_pages = min(15, len(page_images))  # Default
+                
+                if "pro" in model_to_use:
+                    # Pro models can handle more pages
+                    max_pages = min(20, len(page_images))
+                
+                selected_images = page_images[:max_pages]
+                
+                # Then add each image using Part.from_bytes
+                for img in selected_images:
+                    # Convert PIL image to bytes
+                    img_byte_arr = io.BytesIO()
+                    img.save(img_byte_arr, format='PNG')
+                    img_bytes = img_byte_arr.getvalue()
+                    
+                    # Add image as a Part using from_bytes method
+                    contents.append(
+                        types.Part.from_bytes(
+                            data=img_bytes,
+                            mime_type="image/png"
+                        )
+                    )
+                
+                # Generate content using images
+                response = client.models.generate_content(
+                    model=model_to_use,
+                    contents=contents,
+                    config=generation_config
+                )
+                
+                processing_method = "image_based"
+                logger.info("Successfully processed document using images")
+        
+        else:
+            # No PDF bytes available, use image-based approach directly
+            logger.info("PDF bytes not available, using image-based approach")
+            
+            # Select number of pages based on model and paper length
+            max_pages = min(15, len(page_images))  # Default
+            
+            if "pro" in model_to_use:
+                # Pro models can handle more pages
+                max_pages = min(20, len(page_images))
+            
+            selected_images = page_images[:max_pages]
+            
+            # Then add each image using Part.from_bytes
+            for img in selected_images:
+                # Convert PIL image to bytes
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='PNG')
+                img_bytes = img_byte_arr.getvalue()
+                
+                # Add image as a Part using from_bytes method
+                contents.append(
+                    types.Part.from_bytes(
+                        data=img_bytes,
+                        mime_type="image/png"
+                    )
+                )
+            
+            # Generate content using images
+            response = client.models.generate_content(
+                model=model_to_use,
+                contents=contents,
+                config=generation_config
+            )
+            
+            processing_method = "image_based"
+            logger.info("Successfully processed document using images")
         
         # Process the response
         result = {
@@ -140,6 +220,7 @@ def analyze_paper_with_gemini(
             "analysis_type": analysis_type,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "model_used": model_to_use,
+            "processing_method": processing_method
         }
         
         # For comprehensive analysis, extract structured sections
@@ -166,8 +247,14 @@ def analyze_paper_with_gemini(
         
         # Add processing metadata
         result["processing_time"] = time.time() - start_time
-        result["pages_analyzed"] = len(selected_images)
-        result["total_pages"] = len(page_images)
+        
+        if processing_method == "direct_pdf":
+            # For PDF-based processing
+            result["pdf_processed"] = True
+        else:
+            # For image-based processing
+            result["pages_analyzed"] = len(selected_images)
+            result["total_pages"] = len(page_images)
         
         if AUTO_UPGRADE_TO_PRO:
             result["paper_complexity"] = metadata.get("estimated_complexity", 0)
@@ -176,6 +263,7 @@ def analyze_paper_with_gemini(
         return result
         
     except Exception as e:
+        logger.error(f"Analysis failed: {str(e)}")
         return {
             "error": str(e),
             "analysis_type": analysis_type,
