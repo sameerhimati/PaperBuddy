@@ -147,3 +147,22 @@ def encode_image_for_api(image: Image.Image) -> str:
     buffered = io.BytesIO()
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+def extract_title_from_pdf(doc):
+    """Attempt to extract a readable title from PDF metadata or content"""
+    # Try to get from metadata
+    meta_title = doc.metadata.get("title", "")
+    
+    # If metadata title looks like ISBN or is empty, try to extract from first page
+    if not meta_title or meta_title.replace("-", "").isdigit() or len(meta_title) < 3:
+        # Try to extract from first page text
+        first_page = doc.load_page(0)
+        text = first_page.get_text()
+        
+        # Use first non-empty line that's not numbers/symbols as title
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        for line in lines:
+            if len(line) > 10 and not line.replace("-", "").isdigit() and not all(c.isdigit() or c.isspace() or c in ':-.' for c in line):
+                return line
+    
+    return meta_title if meta_title else "Unknown Title"

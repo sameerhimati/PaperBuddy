@@ -42,3 +42,9 @@ DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 # Create cache directory if it doesn't exist
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+def get_client_config(user_api_key=None):
+    """Returns configuration dict with either user API key or default"""
+    return {
+        "api_key": user_api_key or GOOGLE_API_KEY
+    }
