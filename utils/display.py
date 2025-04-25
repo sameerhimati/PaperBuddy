@@ -33,15 +33,13 @@ def display_paper_metadata(metadata: Dict[str, Any]):
 
 def display_key_definitions(definitions: Dict[str, Dict[str, str]]):
     """
-    Display key definitions with hover explanations
-    
-    Args:
-        definitions: Dictionary of definitions where each key is a term and value is dict with 'definition' and 'explanation'
+    Display key definitions with improved styling and layout
     """
     if not definitions:
         return
     
-    st.markdown("### 📚 Key Terminology")
+    st.markdown("## 🔑 Key Terminology")
+    st.markdown("---")
     
     # Create grid layout based on number of definitions
     num_terms = len(definitions)
@@ -52,149 +50,146 @@ def display_key_definitions(definitions: Dict[str, Dict[str, str]]):
         
         for i, (term, info) in enumerate(definitions.items()):
             with cols[i % num_cols]:
-                # Create an expander for each term
+                # Create an expander for each term with better styling
                 with st.expander(term):
                     st.markdown(f"**Definition:** {info.get('definition', 'No definition available')}")
+                    
                     if 'explanation' in info:
                         st.markdown(f"**Simplified:** {info.get('explanation')}")
 
-def display_analysis_type_tabs(
-    analysis_types: Dict[str, Dict[str, str]],
+def get_analysis_type_description(analysis_type: str) -> Dict[str, str]:
+    """
+    Get the description for a specific analysis type
+    
+    Args:
+        analysis_type: The analysis type key
+        
+    Returns:
+        Dictionary with analysis type details
+    """
+    analysis_types = {
+        "comprehensive": {
+            "title": "Comprehensive Analysis",
+            "description": "Complete academic review with summary, innovations, techniques, and limitations",
+            "icon": "📊",
+            "for": "Researchers and academics"
+        },
+        "quick_summary": {
+            "title": "Quick Summary",
+            "description": "Brief overview with key points in bullet format",
+            "icon": "⏱️",
+            "for": "Busy readers needing essentials"
+        },
+        "technical": {
+            "title": "Technical Deep Dive",
+            "description": "Detailed analysis of algorithms, methods, and implementation details",
+            "icon": "🔬",
+            "for": "Engineers and developers"
+        },
+        "practical": {
+            "title": "Practical Applications",
+            "description": "Focus on real-world use cases and industry relevance",
+            "icon": "🛠️",
+            "for": "Industry professionals"
+        },
+        "simplified": {
+            "title": "Explain Like I'm 5",
+            "description": "Simplified explanation using everyday language and analogies",
+            "icon": "👶",
+            "for": "Non-experts and students"
+        }
+    }
+    
+    return analysis_types.get(analysis_type, {})
+
+def display_analysis_type_select(
     current_type: str,
     on_change_callback=None
 ):
     """
-    Display analysis type tabs with better highlighting
+    Display a simple dropdown for analysis type selection
     
     Args:
-        analysis_types: Dictionary of analysis types and their descriptions
         current_type: Currently selected analysis type
-        on_change_callback: Function to call when tab is changed
+        on_change_callback: Function to call when selection changes
     """
-    # Use custom CSS for active tab highlight
-    st.markdown("""
-    <style>
-    .analysis-card {
-        position: relative;
-        text-align: left;
-        border-radius: 8px;
-        padding: 15px;
-        margin: 0 5px 10px 5px;
-        cursor: pointer;
-        transition: all 0.3s;
-        border: 1px solid rgba(49, 51, 63, 0.2);
-        height: 100%;
-        min-height: 180px;
+    # Analysis type descriptions
+    analysis_types = {
+        "comprehensive": {
+            "title": "Comprehensive Analysis",
+            "description": "Complete academic review with summary, innovations, techniques, and limitations",
+            "icon": "📊",
+            "for": "Researchers and academics"
+        },
+        "quick_summary": {
+            "title": "Quick Summary",
+            "description": "Brief overview with key points in bullet format",
+            "icon": "⏱️",
+            "for": "Busy readers needing essentials"
+        },
+        "technical": {
+            "title": "Technical Deep Dive",
+            "description": "Detailed analysis of algorithms, methods, and implementation details",
+            "icon": "🔬",
+            "for": "Engineers and developers"
+        },
+        "practical": {
+            "title": "Practical Applications",
+            "description": "Focus on real-world use cases and industry relevance",
+            "icon": "🛠️",
+            "for": "Industry professionals"
+        },
+        "simplified": {
+            "title": "Explain Like I'm 5",
+            "description": "Simplified explanation using everyday language and analogies",
+            "icon": "👶",
+            "for": "Non-experts and students"
+        }
     }
-    .analysis-card:hover {
-        background-color: rgba(49, 51, 63, 0.1);
-        transform: translateY(-2px);
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    .analysis-card.active {
-        background-color: rgba(28, 131, 225, 0.1);
-        border: 1px solid rgba(28, 131, 225, 0.8);
-    }
-    .card-icon {
-        font-size: 1.5rem;
-        margin-bottom: 8px;
-    }
-    .card-title {
-        font-weight: 600;
-        margin-bottom: 8px;
-        font-size: 1rem;
-    }
-    .card-desc {
-        font-size: 0.8rem;
-        margin-bottom: 8px;
-        color: rgba(49, 51, 63, 0.8);
-    }
-    .card-for {
-        font-size: 0.75rem;
-        font-style: italic;
-        position: absolute;
-        bottom: 15px;
-        color: rgba(49, 51, 63, 0.6);
-    }
-                
-    div[data-testid="stButton"] {
-                    visibility: hidden;
-                    position: absolute;
-                    width: 1px;
-                    height: 1px;
-                    padding: 0;
-                    margin: -1px;
-                    overflow: hidden;
-                    clip: rect(0, 0, 0, 0);
-                    white-space: nowrap;
-                    border-width: 0;
-                }
-            
-                div[data-testid="stButton"]:focus {
-                    visibility: visible;
-                    position: unset;
-                    width: unset;
-                    height: unset;
-                    padding: unset;
-                    margin: unset;
-                    overflow: unset;
-                    clip: unset;
-                    white-space: unset;
-                    border-width: unset;
-                }
-    </style>
-    """, unsafe_allow_html=True)
     
-    # Use container to ensure equal height for all cards
-    with st.container():
-        cols = st.columns(len(analysis_types))
-        
-        # Display cards
-        for i, (key, info) in enumerate(analysis_types.items()):
-            with cols[i]:
-                # Apply active class for selected tab
-                is_active = key == current_type
-                active_class = "active" if is_active else ""
-                
-                # Create a button with card styling
-                html_card = f"""
-                <div class="analysis-card {active_class}" 
-                     onclick="document.getElementById('btn_{key}').click()">
-                    <div class="card-icon">{info["icon"]}</div>
-                    <div class="card-title">{info["title"]}</div>
-                    <div class="card-desc">{info["description"]}</div>
-                    <div class="card-for">For: {info["for"]}</div>
-                </div>
-                """
-                st.markdown(html_card, unsafe_allow_html=True)
-                
-                # Hidden button for functionality (completely invisible)
-                if st.button("", key=f"btn_{key}", 
-                            help=f"{info['description']}\n\nBest for: {info['for']}"):
-                    # Call callback if provided
-                    if on_change_callback:
-                        on_change_callback(key)
+    # Format options for display
+    options = list(analysis_types.keys())
+    
+    # Create formatted labels for dropdown
+    format_func = lambda x: f"{analysis_types[x]['icon']} {analysis_types[x]['title']}"
+    
+    # Display the dropdown and handle selection
+    selected = st.selectbox(
+        "Select Analysis Type",
+        options,
+        format_func=format_func,
+        index=options.index(current_type) if current_type in options else 0,
+    )
+    
+    # Show description of selected type
+    if selected in analysis_types:
+        st.info(f"{analysis_types[selected]['description']} (For: {analysis_types[selected]['for']})")
+    
+    # Handle change if needed
+    if selected != current_type and on_change_callback:
+        on_change_callback(selected)
+    
+    return selected
 
 def display_analysis_results(
     results: Dict[str, Any], 
     expand_all: bool = False,
     simplified: bool = False,
-    display_mode: str = "tabs",
+    display_mode: str = "sections",
     show_definitions: bool = True
 ):
     """
-    Display analysis results from AI in a structured format.
-    
-    Args:
-        results: Analysis results dictionary
-        expand_all: Whether to expand all sections by default
-        simplified: Whether to display in simplified mode
-        display_mode: How to display sections ("tabs" or "expanders")
-        show_definitions: Whether to show key definitions section
+    Display analysis results with improved section formatting
     """
     if 'error' in results:
         st.error(f"Error in analysis: {results['error']}")
         return
+    
+    # Display model and timing info as a caption if available, but only once
+    if not show_definitions:  # Only show if we're not already showing definitions
+        model_used = results.get('model_used', 'Unknown model')
+        processing_time = results.get('processing_time', 0)
+        st.caption(f"Analysis by {model_used} | {processing_time:.1f} seconds")
     
     # Display key definitions if available and requested
     if show_definitions and 'key_definitions' in results and results['key_definitions']:
@@ -203,102 +198,76 @@ def display_analysis_results(
     # Display analysis based on type
     if simplified or results.get('analysis_type') == 'simplified':
         # Display simplified view (ELI5 mode)
+        st.markdown("## Paper Analysis")
+        st.markdown("---")
         if 'simplified' in results:
             st.markdown(results['simplified'])
         elif 'eli5' in results:
             st.markdown(results['eli5'])
         else:
             st.info("No simplified explanation available. Please run the analysis with 'Explain Like I'm 5' option.")
+        return
     
     elif results.get('analysis_type') == 'quick_summary':
         # Display quick summary as is
+        st.markdown("## Paper Summary")
+        st.markdown("---")
         if 'raw_analysis' in results:
             st.markdown(results['raw_analysis'])
+        return
     
     elif results.get('analysis_type') in ['technical', 'practical']:
         # Display technical or practical analysis as is
+        st.markdown("## Technical Analysis" if results.get('analysis_type') == 'technical' else "## Practical Applications")
+        st.markdown("---")
         if 'raw_analysis' in results:
             st.markdown(results['raw_analysis'])
+        return
     
+    # Standard view with well-structured sections
+    # Ordered sections for consistent display
+    section_order = ["summary", "key_innovations", "techniques", "practical_value", "limitations"]
+    
+    # Add better section titles and icons
+    section_titles = {
+        "summary": "1. Overview",
+        "key_innovations": "2. Key Innovations",
+        "techniques": "3. Technical Methods",
+        "practical_value": "4. Practical Applications",
+        "limitations": "5. Limitations"
+    }
+    
+    section_icons = {
+        "summary": "📝",
+        "key_innovations": "💡",
+        "techniques": "⚙️",
+        "practical_value": "🔧", 
+        "limitations": "⚠️"
+    }
+    
+    # Check if we have structured sections
+    has_structured_sections = any(section in results for section in section_order)
+    
+    if has_structured_sections:
+        st.markdown("## Detailed Analysis")
+        st.markdown("---")
+        
+        # Use expanders for sections
+        for section in section_order:
+            if section in results:
+                icon = section_icons.get(section, "📄")
+                title = section_titles.get(section, section.replace('_', ' ').title())
+                
+                # More prominent section header with better styling
+                with st.expander(f"{icon} {title}", expanded=(section == "summary")):
+                    # Add content
+                    st.markdown(results[section])
     else:
-        # Standard view with well-structured sections
-        # Ordered sections for consistent display
-        section_order = ["summary", "key_innovations", "techniques", "practical_value", "limitations"]
-        
-        # Check if we have structured sections
-        has_structured_sections = any(section in results for section in section_order)
-        
-        if has_structured_sections:
-            if display_mode == "tabs":
-                # Get available sections
-                available_sections = [s for s in section_order if s in results]
-                if not available_sections:
-                    st.markdown(results.get('raw_analysis', 'No analysis available'))
-                    return
-                
-                # Create tabs with section icons
-                section_icons = {
-                    "summary": "📝",
-                    "key_innovations": "💡",
-                    "techniques": "⚙️",
-                    "practical_value": "🔧", 
-                    "limitations": "⚠️"
-                }
-                
-                tab_labels = [f"{section_icons.get(section, '📄')} {section.replace('_', ' ').title()}" 
-                              for section in available_sections]
-                
-                # Use native Streamlit tabs
-                tabs = st.tabs(tab_labels)
-                
-                # Fill each tab with content
-                for i, section in enumerate(available_sections):
-                    with tabs[i]:
-                        st.markdown(results[section])
-            
-            else:
-                # Use expanders for sections
-                for section in section_order:
-                    if section in results:
-                        section_icons = {
-                            "summary": "📝",
-                            "key_innovations": "💡",
-                            "techniques": "⚙️",
-                            "practical_value": "🔧",
-                            "limitations": "⚠️"
-                        }
-                        icon = section_icons.get(section, "📄")
-                        title = section.replace('_', ' ').title()
-                        with st.expander(f"{icon} {title}", expanded=expand_all):
-                            st.markdown(results[section])
-        else:
-            # If structured data isn't available, display raw analysis
-            if 'raw_analysis' in results:
-                st.markdown(results['raw_analysis'])
-    
-    # Display processing metadata in a concise format
-    with st.expander("Analysis Details", expanded=False):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            model_used = results.get('model_used', 'Unknown model')
-            processing_time = results.get('processing_time', 0)
-            st.markdown(f"**Model:** {model_used}")
-            st.markdown(f"**Processing Time:** {processing_time:.2f} seconds")
-            
-        with col2:
-            if 'pages_analyzed' in results:
-                st.markdown(f"**Pages Analyzed:** {results.get('pages_analyzed', 0)} of {results.get('total_pages', 0)}")
-            else:
-                st.markdown(f"**Processing Method:** {'PDF Direct' if results.get('pdf_processed', False) else 'Image-Based'}")
-                
-            if 'paper_complexity' in results:
-                # Create visual indicator for complexity
-                complexity = results.get('paper_complexity', 0)
-                complexity_color = get_complexity_color(complexity)
-                
-                st.markdown(f"**Estimated Complexity:** {complexity:.2f}")
-                st.progress(min(complexity, 1.0))  # Use native progress bar
+        # If structured data isn't available, display raw analysis
+        st.markdown("## Paper Analysis")
+        st.markdown("---")
+        if 'raw_analysis' in results:
+            st.markdown(results['raw_analysis'])
 
 def display_past_analyses(
     past_results: Dict[str, Dict[str, Any]], 
@@ -335,20 +304,13 @@ def display_past_analyses(
     # Create a cleaner UI for past analyses
     for type_key in other_analyses:
         type_name = analysis_types.get(type_key, type_key)
+        type_info = get_analysis_type_description(type_key)
         
         # Create a cleaner container for each past analysis
         col1, col2 = st.columns([4, 1])
         
         with col1:
-            st.markdown(f"**{type_name}**")
-            
-            # Show a brief preview
-            if 'summary' in past_results[type_key]:
-                preview = past_results[type_key]['summary'][:100] + "..." if len(past_results[type_key]['summary']) > 100 else past_results[type_key]['summary']
-                st.caption(preview)
-            elif 'raw_analysis' in past_results[type_key]:
-                preview = past_results[type_key]['raw_analysis'][:100] + "..." if len(past_results[type_key]['raw_analysis']) > 100 else past_results[type_key]['raw_analysis']
-                st.caption(preview)
+            st.markdown(f"**{type_info.get('icon', '')} {type_name}**")
         
         with col2:
             if st.button("View", key=f"view_{type_key}"):
@@ -357,6 +319,40 @@ def display_past_analyses(
                     on_select_callback(type_key)
         
         st.markdown("<hr style='margin: 10px 0; opacity: 0.2;'>", unsafe_allow_html=True)
+
+def display_paper_overview(metadata: Dict[str, Any], field_tags: Dict[str, Any] = None):
+    """
+    Display paper overview including title, authors, and field tags
+    """
+    # Paper title
+    paper_title = metadata.get('title', 'Unknown Title')
+    st.markdown(f"## {paper_title}")
+    
+    # Paper metadata in a clean format
+    authors = metadata.get('author', 'Unknown Author')
+    pages = metadata.get('page_count', 'Unknown')
+    
+    st.markdown(f"**Authors:** {authors} | **Pages:** {pages}")
+    
+    # Display field tags if available
+    if field_tags:
+        # Create field tags with clean styling
+        tag_html = "<div style='margin: 1rem 0;'>"
+        for tag, info in field_tags.items():
+            tag_html += f"<span style='display: inline-block; background-color: rgba(28, 131, 225, 0.1); padding: 0.2rem 0.6rem; border-radius: 1rem; margin-right: 0.5rem; margin-bottom: 0.5rem; font-size: 0.8rem;'>{tag}</span>"
+        tag_html += "</div>"
+        
+        st.markdown(tag_html, unsafe_allow_html=True)
+        
+        # Show field tag descriptions in an expander
+        with st.expander("Field Descriptions", expanded=False):
+            for tag, info in field_tags.items():
+                if 'description' in info:
+                    st.markdown(f"**{tag}**: {info['description']}")
+                    if 'link' in info and info['link']:
+                        st.markdown(f"[Learn more]({info['link']})")
+    
+    st.markdown("---")
 
 def get_complexity_color(complexity: float) -> str:
     """Generate color based on complexity score"""
