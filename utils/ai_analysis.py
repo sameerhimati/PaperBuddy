@@ -1,167 +1,686 @@
 import time
 import re
 import json
-from typing import List, Dict, Any, Optional
-from google import genai
-from google.genai import types
+import logging
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional, Union, Tuple
 from PIL import Image
 import io
-import logging
-from config import (
-    GOOGLE_API_KEY, 
-    ACTIVE_MODEL,
-    DEFAULT_MODEL,
-    PRO_MODEL, 
-    AUTO_UPGRADE_TO_PRO,
-    COMPLEXITY_THRESHOLD,
-    MAX_OUTPUT_TOKENS,
-    TEMPERATURE,
-    TOP_P,
-    TOP_K
-)
-from utils.prompts import get_prompt, KEY_DEFINITIONS_PROMPT
+import concurrent.futures
+
+from google import genai
+from google.genai import types
+
+# Config imports
+from config import get_model_config, get_api_key
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create the Google AI client with configurable API key
-def get_client(api_key=None):
-    """Get Gemini client with either user-provided or default API key"""
-    return genai.Client(api_key=api_key or GOOGLE_API_KEY)
 
-def get_available_models(api_key=None):
-    """Get list of available Gemini models"""
-    client = get_client(api_key)
-    try:
-        models = client.models.list()
-        available_models = [model.name for model in models]
-        return available_models
-    except Exception as e:
-        logger.error(f"Error getting available models: {str(e)}")
-        return []
+@dataclass
+class AnalysisResult:
+    """Data class for storing analysis results"""
+    analysis_type: str
+    raw_analysis: str
+    model_used: str
+    processing_time: float
+    sections: Dict[str, str] = field(default_factory=dict)
+    key_definitions: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
+    
+    @property
+    def is_successful(self) -> bool:
+        """Check if analysis was successful"""
+        return self.error is None and len(self.raw_analysis) > 0
+    
+    def get_section(self, section_name: str, default: str = "") -> str:
+        """Get a section by name with default fallback"""
+        return self.sections.get(section_name, default)
 
-def extract_metadata_from_pdf(page_images, api_key=None):
+
+def create_genai_client(api_key: Optional[str] = None) -> genai.Client:
     """
-    Use Gemini to extract title and authors when PDF metadata fails
-    """
-    if not page_images or len(page_images) == 0:
-        return {"title": "Unknown Title", "author": "Unknown Author"}
+    Create Google Generative AI client with appropriate API key
     
-    # Only use the first page for metadata extraction
-    first_page = page_images[0]
-    
-    client = get_client(api_key)
-    
-    prompt = """
-    Extract the paper title and authors from this academic paper's first page.
-    Respond in JSON format only, like this:
-    {
-      "title": "The full paper title",
-      "authors": "Author1, Author2, Author3, etc."
-    }
-    """
-    
-    try:
-        # Convert image to bytes
-        img_byte_arr = io.BytesIO()
-        first_page.save(img_byte_arr, format='PNG')
-        img_bytes = img_byte_arr.getvalue()
+    Args:
+        api_key: Optional user-provided API key
         
-        # Add image as a Part using from_bytes method
-        contents = [
-            prompt,
-            types.Part.from_bytes(data=img_bytes, mime_type="image/png")
-        ]
+    Returns:
+        Configured genai.Client object
+    """
+    # Get API key (user-provided or default)
+    key = api_key or get_api_key()
+    
+    if not key:
+        raise ValueError("No API key available. Please provide a valid API key.")
+        
+    return genai.Client(api_key=key)
 
+
+def safe_json_loads(json_str: str) -> Dict[str, Any]:
+    """
+    Safely parse JSON string with better error handling
+    
+    Args:
+        json_str: JSON string to parse
+        
+    Returns:
+        Parsed JSON object or empty dict if parsing fails
+    """
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON parse error: {str(e)}")
+        return {}
+
+
+def extract_structured_data(response_text: str) -> Dict[str, Any]:
+    """
+    Extract structured data from model response with robust error handling
+    
+    Args:
+        response_text: Raw text response from model
+        
+    Returns:
+        Extracted structured data or empty dict
+    """
+    # Strategy 1: Look for JSON blocks (```json ... ```)
+    json_blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)\s*```', response_text)
+    
+    for block in json_blocks:
+        try:
+            result = json.loads(block.strip())
+            if result and isinstance(result, dict):
+                return result
+        except:
+            pass
+    
+    # Strategy 2: Look for entire response as JSON
+    if response_text.strip().startswith('{') and response_text.strip().endswith('}'):
+        try:
+            result = json.loads(response_text.strip())
+            if result and isinstance(result, dict):
+                return result
+        except:
+            pass
+    
+    # Strategy 3: Look for JSON-like objects anywhere in the text
+    bracket_start = response_text.find('{')
+    bracket_end = response_text.rfind('}')
+    
+    if bracket_start >= 0 and bracket_end > bracket_start:
+        json_candidate = response_text[bracket_start:bracket_end + 1]
+        try:
+            result = json.loads(json_candidate)
+            if result and isinstance(result, dict):
+                return result
+        except:
+            pass
+    
+    # If all strategies fail, return empty dict
+    return {}
+
+
+def extract_section(text: str, section_name: str, next_section: Optional[str] = None) -> str:
+    """
+    Extract content of a specific section from analysis text
+    
+    Args:
+        text: Full analysis text
+        section_name: Name of section to extract
+        next_section: Name of next section (to determine where section ends)
+        
+    Returns:
+        Extracted section text or empty string
+    """
+    # Different heading patterns to try
+    heading_patterns = [
+        fr'(?:^|\n)[ ]*{re.escape(section_name)}[ ]*(?:$|\n)',  # Plain heading
+        fr'(?:^|\n)[ ]*#{1,6}[ ]*{re.escape(section_name)}[ ]*(?:$|\n)',  # Markdown heading
+        fr'(?:^|\n)[ ]*\d+\.[ ]*{re.escape(section_name)}[ ]*(?:$|\n)'  # Numbered heading
+    ]
+    
+    # Try each pattern until one works
+    section_start = -1
+    for pattern in heading_patterns:
+        match = re.search(pattern, text, re.MULTILINE)
+        if match:
+            section_start = match.end()
+            break
+    
+    if section_start == -1:
+        return ""
+    
+    # Find end of section
+    section_end = len(text)
+    if next_section:
+        for pattern in heading_patterns:
+            next_pattern = pattern.replace(re.escape(section_name), re.escape(next_section))
+            match = re.search(next_pattern, text[section_start:], re.MULTILINE)
+            if match:
+                section_end = section_start + match.start()
+                break
+    
+    # Extract and clean section text
+    section_text = text[section_start:section_end].strip()
+    
+    # Clean up formatting issues
+    section_text = re.sub(r'^\s*[\*\-\•]\s*$', '', section_text, flags=re.MULTILINE)  # Remove bullet-only lines
+    section_text = re.sub(r'^\s*[\*\-\•]\s*', '* ', section_text, flags=re.MULTILINE)  # Standardize bullets
+    section_text = re.sub(r'\n{3,}', '\n\n', section_text)  # Fix extra newlines
+    
+    return section_text.strip()
+
+
+def extract_all_sections(analysis_text: str) -> Dict[str, str]:
+    """
+    Extract all standard sections from analysis text
+    
+    Args:
+        analysis_text: Full analysis text
+        
+    Returns:
+        Dict mapping section names to content
+    """
+    # Define section structure (in order)
+    sections = [
+        "SUMMARY",
+        "KEY INNOVATIONS",
+        "TECHNIQUES",
+        "PRACTICAL VALUE",
+        "LIMITATIONS"
+    ]
+    
+    result = {}
+    
+    # Extract each section
+    for i, section in enumerate(sections):
+        next_section = sections[i + 1] if i < len(sections) - 1 else None
+        content = extract_section(analysis_text, section, next_section)
+        
+        if content:
+            # Convert to lowercase with underscores for keys
+            key = section.lower().replace(' ', '_')
+            result[key] = content
+    
+    return result
+
+
+def extract_key_definitions(
+    model_response: str,
+    min_definitions: int = 3,
+    max_definitions: int = 10
+) -> Dict[str, Dict[str, str]]:
+    """
+    Extract key terminology definitions from model response
+    
+    Args:
+        model_response: Raw text response from model
+        min_definitions: Minimum number of definitions to extract
+        max_definitions: Maximum number of definitions to extract
+        
+    Returns:
+        Dictionary of term definitions
+    """
+    # First try to extract as JSON
+    json_data = extract_structured_data(model_response)
+    
+    if json_data and len(json_data) >= min_definitions:
+        # Validate structure (each value should have definition/explanation)
+        valid_entries = {}
+        
+        for term, info in json_data.items():
+            if isinstance(info, dict) and "definition" in info:
+                valid_entries[term] = {
+                    "definition": info.get("definition", ""),
+                    "explanation": info.get("explanation", "")
+                }
+            elif isinstance(info, str):
+                # Handle cases where the model outputs a simpler format
+                valid_entries[term] = {
+                    "definition": info,
+                    "explanation": ""
+                }
+        
+        if len(valid_entries) >= min_definitions:
+            return valid_entries
+    
+    # If JSON extraction failed, try heuristic extraction
+    definitions = {}
+    
+    # Look for patterns like "Term: Definition" or "Term - Definition"
+    term_patterns = [
+        r'["\*_]*([A-Z][A-Za-z0-9 \-]+)["\*_]*:[ \t]*([^\n]+(?:\n(?![\n\*])[^\n]+)*)',
+        r'["\*_]*([A-Z][A-Za-z0-9 \-]+)["\*_]*[ \t]*\-[ \t]*([^\n]+(?:\n(?![\n\*])[^\n]+)*)'
+    ]
+    
+    for pattern in term_patterns:
+        matches = re.findall(pattern, model_response)
+        for term, definition in matches:
+            term = term.strip()
+            if len(term) > 2 and term not in definitions:
+                definitions[term] = {
+                    "definition": definition.strip(),
+                    "explanation": ""  # No explanation available with this method
+                }
+            
+            if len(definitions) >= max_definitions:
+                break
+    
+    return definitions
+
+
+def analyze_terminology(
+    page_images: List[Image.Image],
+    metadata: Dict[str, Any],
+    api_key: Optional[str] = None
+) -> Dict[str, Dict[str, str]]:
+    """
+    Extract key terminology from paper
+    
+    Args:
+        page_images: List of page images
+        metadata: Paper metadata
+        api_key: Optional API key
+        
+    Returns:
+        Dictionary of terminology with definitions and explanations
+    """
+    start_time = time.time()
+    
+    try:
+        # Get client and model config
+        client = create_genai_client(api_key)
+        config = get_model_config("terminology")
+        
+        # Create terminology extraction prompt
+        title = metadata.get("title", "Unknown Title")
+        authors = metadata.get("author", "Unknown Author")
+        
+        prompt = f"""
+        You are analyzing an academic paper to extract key terminology and concepts.
+        
+        Paper Title: {title}
+        Authors: {authors}
+        
+        I'm showing you images of this paper. Extract 5-10 key technical terms, concepts or methods that are important for understanding this paper.
+        
+        For each term, provide:
+        1. A formal definition (as it would appear in a textbook)
+        2. A simplified explanation for non-experts
+        
+        FORMAT YOUR RESPONSE AS JSON ONLY:
+        {{
+          "Term Name": {{
+            "definition": "Formal/technical definition",
+            "explanation": "Simpler explanation for non-experts"
+          }},
+          "Another Term": {{
+            "definition": "Formal/technical definition",
+            "explanation": "Simpler explanation for non-experts"
+          }}
+        }}
+        """
+        
+        # Prepare image content
+        contents = [prompt]
+        
+        # Limit to first few pages for terminology extraction
+        max_pages = min(3, len(page_images))
+        
+        # Add page images
+        for img in page_images[:max_pages]:
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='PNG')
+            img_bytes = img_byte_arr.getvalue()
+            
+            contents.append(
+                types.Part.from_bytes(
+                    data=img_bytes,
+                    mime_type="image/png"
+                )
+            )
+        
+        # Set up generation parameters (using lower temperature for more reliable extraction)
         generation_config = types.GenerateContentConfig(
-            max_output_tokens=1024,
-            temperature= 0.1,
-            top_p=0.95,
-            top_k=40
+            max_output_tokens=config.get("max_output_tokens", 1024),
+            temperature=0.1,  # Lower temperature for terminology extraction
+            top_p=config.get("top_p", 0.95),
+            top_k=config.get("top_k", 40)
         )
         
-        # Generate content using a lightweight model - FIX: use properly configured generation parameters
-        model = "gemini-2.0-flash-lite"
+        # Generate content
         response = client.models.generate_content(
-            model=model,
+            model=config.get("model"),
             contents=contents,
             config=generation_config
         )
         
-        # Extract JSON from response
-        json_pattern = r"```json\s*([\s\S]*?)\s*```|{[\s\S]*}"
-        match = re.search(json_pattern, response.text)
+        # Extract terminology from response
+        definitions = extract_key_definitions(response.text)
         
-        if match:
-            json_str = match.group(1) if match.group(1) else match.group(0)
-            # Clean the string
-            json_str = re.sub(r'[^\{\}\"\':\[\],.\d\w\s_-]', '', json_str)
-            metadata = json.loads(json_str)
-            
-            # Make sure we have the right keys
-            if "authors" in metadata and "author" not in metadata:
-                metadata["author"] = metadata["authors"]
-                del metadata["authors"]
-                
-            return metadata
-        else:
-            logger.warning("No valid JSON found in metadata extraction")
-            return {"title": "Unknown Title", "author": "Unknown Author"}
-            
+        logger.info(f"Extracted {len(definitions)} terminology definitions in {time.time() - start_time:.2f}s")
+        
+        return definitions
+        
     except Exception as e:
-        logger.error(f"Error extracting metadata: {str(e)}")
-        return {"title": "Unknown Title", "author": "Unknown Author"}
+        logger.error(f"Error extracting terminology: {str(e)}")
+        return {}
 
-def detect_paper_complexity(metadata: Dict[str, Any], page_images: List[Image.Image]) -> float:
+
+def analyze_paper(
+    page_images: List[Image.Image],
+    metadata: Dict[str, Any],
+    analysis_type: str = "comprehensive",
+    api_key: Optional[str] = None,
+    pdf_bytes: Optional[bytes] = None,
+    simplified: bool = False
+) -> AnalysisResult:
     """
-    Estimate the complexity of a paper to determine if we should use Pro model.
-    This is a simple heuristic approach that could be improved over time.
+    Analyze paper using Gemini model
     
+    Args:
+        page_images: List of page images
+        metadata: Paper metadata
+        analysis_type: Type of analysis to perform
+        api_key: Optional API key
+        pdf_bytes: Optional PDF bytes for direct PDF processing
+        simplified: Whether to provide simplified explanation
+        
     Returns:
-        Float between 0-1 representing estimated complexity
+        AnalysisResult object
     """
-    complexity = 0.0
+    start_time = time.time()
     
-    # Check for complexity indicators in metadata
-    abstract = metadata.get("abstract", "").lower()
-    title = metadata.get("title", "").lower()
-    
-    # Keywords suggesting complexity
-    complex_keywords = [
-        "novel", "framework", "algorithm", "theoretical", "mathematics", 
-        "quantum", "neural", "deep learning", "transformer", "attention",
-        "theorem", "proof", "equation", "optimization", "gradient"
-    ]
-    
-    # Check title and abstract for complex keywords
-    for keyword in complex_keywords:
-        if keyword in title:
-            complexity += 0.15  # Higher weight for title
-        if keyword in abstract:
-            complexity += 0.05  # Lower weight for abstract
-    
-    # Check for math-heavy content
-    equation_pattern = r"\$.*?\$|\\begin\{equation\}|\\sum|\\frac"
-    math_content = 0
-    
-    # Check first few pages for equations
-    for i, img in enumerate(page_images[:min(5, len(page_images))]):
-        # This is a simplified check - in a real implementation, you'd use OCR
-        # or other techniques to detect equations in images
-        # For now, we'll just add some complexity for papers with many pages
-        if i > 3:
-            math_content += 0.05
-    
-    complexity += min(math_content, 0.3)  # Cap math complexity contribution
-    
-    # Limit to 0-1 range
-    complexity = min(max(complexity, 0.0), 1.0)
-    return complexity
+    try:
+        # Get client and model config
+        client = create_genai_client(api_key)
+        
+        # Override analysis type for simplified mode
+        if simplified:
+            analysis_type = "simplified"
+            
+        # Get model configuration
+        config = get_model_config(analysis_type)
+        
+        # Create appropriate prompt for analysis type
+        title = metadata.get("title", "Unknown Title")
+        authors = metadata.get("author", "Unknown Author")
+        
+        # Simplified base prompt for better analysis quality
+        base_prompt = f"""
+        You are an expert academic researcher analyzing a research paper.
+        
+        Paper Title: {title}
+        Authors: {authors}
+        
+        I'm showing you images of this paper. Please analyze the content carefully, 
+        focusing on text, figures, tables, and equations.
+        
+        IMPORTANT GUIDELINES:
+        1. Be objective and critically evaluate the work - NOT all papers make significant contributions
+        2. Use the FULL range of the 1-10 scale for ratings:
+           - 1-3: Below average contributions/approaches
+           - 4-6: Average quality for the field
+           - 7-8: Good contributions, but not revolutionary
+           - 9-10: Exceptional, field-changing work (rare)
+        3. Support ALL ratings with specific evidence from the paper
+        4. Identify at least 2-3 SPECIFIC limitations or weaknesses
+        5. Format all ratings as: Rating: X/10 - followed by justification
+        """
+        
+        # Add analysis-specific instructions
+        if analysis_type == "comprehensive":
+            prompt = f"""{base_prompt}
+            
+            REQUIRED OUTPUT FORMAT:
+            SUMMARY
+            [A concise 3-5 sentence summary]
+            
+            KEY INNOVATIONS (Rate novelty X/10)
+            * [Key innovation 1]
+            * [Key innovation 2]
+            ...
+            
+            TECHNIQUES (Rate technical quality X/10)
+            * [Technique 1]
+            * [Technique 2]
+            ...
+            
+            PRACTICAL VALUE (Rate practicality X/10)
+            * [Application point 1]
+            * [Application point 2]
+            ...
+            
+            LIMITATIONS
+            * [Limitation 1]
+            * [Limitation 2]
+            ...
+            """
+        elif analysis_type == "quick_summary":
+            prompt = f"""{base_prompt}
+            
+            Provide a quick overview of this paper for a busy reader:
+            
+            1. Give a single paragraph (3-5 sentences) summarizing the paper's core contribution and significance.
+            
+            2. Provide 5 bullet points:
+               - The specific problem addressed
+               - The key innovation introduced (Rate novelty X/10)
+               - The main results/findings
+               - The most significant limitation
+               - The most promising application
+            
+            Be concise but specific. The entire summary should be readable in under 1 minute.
+            """
+        elif analysis_type == "technical":
+            prompt = f"""{base_prompt}
+            
+            Provide a detailed technical analysis focusing on methods, algorithms, and implementation:
+            
+            CORE ALGORITHMS & METHODS (Rate technical sophistication X/10)
+            * [Describe each algorithm in technical detail]
+            * [Include pseudocode or equations if present]
+            
+            IMPLEMENTATION DETAILS
+            * [Architectural details]
+            * [Training procedures/hyperparameters]
+            * [Data processing pipeline]
+            
+            TECHNICAL EVALUATION & RESULTS
+            * [Benchmarking methodology]
+            * [Performance metrics and their significance]
+            * [Ablation studies or component analyses]
+            
+            TECHNICAL LIMITATIONS
+            * [Mathematical or theoretical limitations]
+            * [Implementation constraints]
+            * [Evaluation gaps]
+            
+            This analysis should provide enough detail for replication or adaptation of the methods.
+            """
+        elif analysis_type == "practical":
+            prompt = f"""{base_prompt}
+            
+            Focus exclusively on the real-world applications and practical implementation:
+            
+            INDUSTRY RELEVANCE (Rate commercial potential X/10)
+            * [Specific industries or domains that could apply this]
+            * [Real-world problems it addresses]
+            
+            IMPLEMENTATION REQUIREMENTS
+            * [Hardware/software requirements]
+            * [Data and computational resources needed]
+            * [Expertise required]
+            
+            COMPARISON TO ALTERNATIVES
+            * [How this approach compares to existing solutions]
+            * [Tradeoffs (speed, accuracy, cost, etc.)]
+            
+            ADOPTION ROADMAP
+            * [Steps needed for production implementation]
+            * [Potential challenges and solutions]
+            * [Timeline for practical adoption]
+            
+            LIMITATIONS FOR PRACTICAL USE
+            * [Specific barriers to real-world adoption]
+            * [Missing components for production readiness]
+            """
+        elif analysis_type == "simplified":
+            prompt = f"""
+            You are explaining a complex research paper to someone with no technical background in this field.
+            
+            Paper Title: {title}
+            Authors: {authors}
+            
+            I'm showing you images of this paper. Create a simplified explanation that:
+            
+            1. Explains what problem the research solves in everyday terms
+            2. Why this matters in the real world with concrete examples
+            3. The main idea of the solution using analogies and simple concepts
+            4. How this might benefit people in practical terms
+            5. Any limitations in simple terms
+            
+            Rules:
+            - Use NO technical jargon without explaining it
+            - Write at an 8th grade reading level
+            - Use everyday analogies and metaphors
+            - Keep your explanation under 500 words total
+            
+            Start with "This paper is about..." and focus on making the core ideas accessible to anyone.
+            """
+        else:
+            # Default to comprehensive for unknown types
+            analysis_type = "comprehensive"
+            prompt = base_prompt  # Use default instructions
+        
+        # Prepare image content
+        contents = [prompt]
+        
+        # Determine if we should try direct PDF processing
+        if pdf_bytes and config.get("try_pdf_input", False):
+            try:
+                logger.info("Attempting to process document as PDF")
+                # Add PDF as a Part
+                contents.append(
+                    types.Part.from_bytes(
+                        data=pdf_bytes,
+                        mime_type="application/pdf"
+                    )
+                )
+                
+                # Generate content using the PDF
+                generation_config = types.GenerateContentConfig(
+                    max_output_tokens=config.get("max_output_tokens", 8192),
+                    temperature=config.get("temperature", 0.2),
+                    top_p=config.get("top_p", 0.95),
+                    top_k=config.get("top_k", 40)
+                )
+                
+                response = client.models.generate_content(
+                    model=config.get("model"),
+                    contents=contents,
+                    config=generation_config
+                )
+                
+                processing_method = "direct_pdf"
+                logger.info("Successfully processed document as PDF")
+                
+            except Exception as e:
+                # If PDF processing fails, fall back to image-based approach
+                logger.warning(f"PDF processing failed: {str(e)}. Falling back to image-based approach.")
+                contents = [prompt]  # Reset contents
+                processing_method = None  # Will be set in the image block
+        else:
+            # No PDF bytes or PDF processing not enabled
+            processing_method = None  # Will be set in the image block
+        
+        # If we don't have a response yet, use image-based approach
+        if not locals().get('response'):
+            # Select number of pages based on model capability and paper length
+            max_pages = min(config.get("max_pages", 15), len(page_images))
+            selected_images = page_images[:max_pages]
+            
+            # Add each image
+            for img in selected_images:
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='PNG')
+                img_bytes = img_byte_arr.getvalue()
+                
+                contents.append(
+                    types.Part.from_bytes(
+                        data=img_bytes,
+                        mime_type="image/png"
+                    )
+                )
+            
+            # Generate content using images
+            generation_config = types.GenerateContentConfig(
+                max_output_tokens=config.get("max_output_tokens", 8192),
+                temperature=config.get("temperature", 0.2),
+                top_p=config.get("top_p", 0.95),
+                top_k=config.get("top_k", 40)
+            )
+            
+            response = client.models.generate_content(
+                model=config.get("model"),
+                contents=contents,
+                config=generation_config
+            )
+            
+            processing_method = "image_based"
+            logger.info(f"Processed document using {len(selected_images)} images")
+        
+        # Extract sections from the response
+        raw_analysis = response.text
+        sections = extract_all_sections(raw_analysis) if analysis_type == "comprehensive" else {}
+        
+        # Calculate processing time
+        processing_time = time.time() - start_time
+        
+        # Create result object
+        result = AnalysisResult(
+            analysis_type=analysis_type,
+            raw_analysis=raw_analysis,
+            model_used=config.get("model"),
+            processing_time=processing_time,
+            sections=sections,
+            metadata={
+                "processing_method": processing_method,
+                "pages_analyzed": len(selected_images) if processing_method == "image_based" else None,
+                "total_pages": len(page_images),
+                "pdf_processed": processing_method == "direct_pdf"
+            }
+        )
+        
+        logger.info(f"Completed {analysis_type} analysis in {processing_time:.2f}s")
+        
+        return result
+        
+    except Exception as e:
+        error_msg = f"Analysis failed: {str(e)}"
+        logger.error(error_msg)
+        
+        # Create error result
+        return AnalysisResult(
+            analysis_type=analysis_type,
+            raw_analysis="",
+            model_used=config.get("model") if 'config' in locals() else "unknown",
+            processing_time=time.time() - start_time,
+            error=error_msg
+        )
 
-def get_field_tags(title, abstract, api_key=None):
+
+def get_field_tags(
+    title: str,
+    abstract: str,
+    api_key: Optional[str] = None
+) -> Dict[str, Dict[str, str]]:
     """
-    Use Gemini API to detect fields dynamically from paper title and abstract.
+    Get field tags for paper based on title and abstract
     
     Args:
         title: Paper title
@@ -171,433 +690,120 @@ def get_field_tags(title, abstract, api_key=None):
     Returns:
         Dictionary of field tags with descriptions and links
     """
-    # If title and abstract are too short, return empty tags
+    # Skip if title or abstract are too short
     if len(title) < 5 or len(abstract) < 20:
         return {}
     
-    # Get client with appropriate API key
-    client = get_client(api_key)
-    
-    prompt = f"""
-    Based on this paper title and abstract, identify 2-4 main research fields or subfields.
-    Return only a JSON object with field names as keys, where each field has a short description and link.
-    
-    Title: {title}
-    Abstract: {abstract[:500]}  # Using first 500 chars of abstract for brevity
-    
-    Example response format:
-    {{
-      "Computer Vision": {{
-        "description": "Field focused on enabling computers to derive information from images",
-        "link": "https://en.wikipedia.org/wiki/Computer_vision"
-      }},
-      "Deep Learning": {{
-        "description": "Machine learning approach using neural networks with many layers",
-        "link": "https://en.wikipedia.org/wiki/Deep_learning"
-      }}
-    }}
-    """
-    
     try:
-        # Use a lightweight model for this task - FIX: use properly configured generation parameters
+        # Get client and config
+        client = create_genai_client(api_key)
+        config = get_model_config("field_tags")
+        
+        # Create field tags prompt
+        prompt = f"""
+        Based on this paper title and abstract, identify 2-4 main research fields or subfields.
+        Return ONLY a JSON object with field names as keys, where each field has a short description and link.
+        
+        Title: {title}
+        Abstract: {abstract[:500]}  # Using first 500 chars for brevity
+        
+        Example response:
+        {{
+          "Computer Vision": {{
+            "description": "Field focused on enabling computers to derive information from images",
+            "link": "https://en.wikipedia.org/wiki/Computer_vision"
+          }},
+          "Deep Learning": {{
+            "description": "Machine learning approach using neural networks with many layers",
+            "link": "https://en.wikipedia.org/wiki/Deep_learning"
+          }}
+        }}
+        
+        IMPORTANT: Respond with JSON ONLY, no extra text.
+        """
+        
+        # Generate content with a lightweight model
         generation_config = types.GenerateContentConfig(
             max_output_tokens=1024,
-            temperature= 0.1,
+            temperature=0.1,  # Lower temperature for more reliable JSON
             top_p=0.95,
             top_k=40
         )
         
-        # Generate content using a lightweight model - FIX: use properly configured generation parameters
-        model = "gemini-2.0-flash-lite"
         response = client.models.generate_content(
-            model=model,
+            model=config.get("model"),
             contents=prompt,
             config=generation_config
         )
         
-        # Extract JSON from response
-        json_pattern = r"```json\s*([\s\S]*?)\s*```|{[\s\S]*}"
-        match = re.search(json_pattern, response.text)
+        # Extract structured data from response
+        field_tags = extract_structured_data(response.text)
         
-        if match:
-            json_str = match.group(1) if match.group(1) else match.group(0)
-            # Clean the string - sometimes models add extra text
-            json_str = re.sub(r'[^\{\}\"\':\[\],.\d\w\s_-]', '', json_str)
-            field_tags = json.loads(json_str)
-            return field_tags
-        else:
-            logger.warning("No valid JSON found in field tag response")
-            return {}
+        return field_tags
             
     except Exception as e:
         logger.error(f"Error getting field tags: {str(e)}")
         return {}
 
-def extract_key_definitions(analysis_text, api_key=None):
-    """
-    Extract key definitions and terminology from the paper analysis
-    
-    Args:
-        analysis_text: The raw analysis text
-        api_key: Optional API key
-        
-    Returns:
-        Dictionary of terms and their definitions with explanations
-    """
-    client = get_client(api_key)
-    
-    prompt = f"""
-    From this paper analysis, extract 5-10 key terms or concepts that would be helpful for readers to understand.
-    For each term, provide a clear, concise definition and an explanation in simpler terms.
-    
-    Return the results as JSON only, in this format:
-    {{
-      "Term Name": {{
-        "definition": "Formal/technical definition",
-        "explanation": "Simpler explanation for non-experts"
-      }},
-      "Another Term": {{
-        "definition": "Formal/technical definition",
-        "explanation": "Simpler explanation for non-experts"
-      }}
-    }}
-    
-    Analysis text:
-    {analysis_text[:4000]}  # Limit to first 4000 chars to stay within context limits
-    """
-    
-    try:
-        # FIX: Use properly configured generation parameters
-        generation_config = types.GenerateContentConfig(
-            max_output_tokens=1024,
-            temperature= 0.1,
-            top_p=0.95,
-            top_k=40
-        )
-        
-        # Generate content using a lightweight model - FIX: use properly configured generation parameters
-        model = "gemini-2.0-flash-lite"
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=generation_config
-        )
-        
-        # Extract JSON from response
-        json_pattern = r"```json\s*([\s\S]*?)\s*```|{[\s\S]*}"
-        match = re.search(json_pattern, response.text)
-        
-        if match:
-            json_str = match.group(1) if match.group(1) else match.group(0)
-            # Clean the string
-            json_str = re.sub(r'[^\{\}\"\':\[\],.\d\w\s_-]', '', json_str)
-            definitions = json.loads(json_str)
-            return definitions
-        else:
-            logger.warning("No valid JSON found in definitions extraction")
-            return {}
-            
-    except Exception as e:
-        logger.error(f"Error extracting definitions: {str(e)}")
-        return {}
 
-def analyze_paper_with_gemini(
-    page_images: List[Image.Image], 
+def process_paper_with_parallel_analysis(
+    page_images: List[Image.Image],
     metadata: Dict[str, Any],
-    analysis_type: str = "comprehensive",
-    force_pro: bool = False,
-    pdf_bytes: Optional[bytes] = None,
     api_key: Optional[str] = None,
-    simplified: bool = False
-) -> Dict[str, Any]:
+    pdf_bytes: Optional[bytes] = None
+) -> Dict[str, AnalysisResult]:
     """
-    Analyze a paper using Google's Gemini model with adaptive model selection.
+    Process paper with parallel analysis tasks
     
     Args:
-        page_images: List of PIL images of the paper pages
-        metadata: Paper metadata dictionary
-        analysis_type: Type of analysis to perform
-        force_pro: Whether to force using the Pro model
-        pdf_bytes: Raw PDF bytes for direct PDF processing (if available)
-        api_key: Optional user-provided API key
-        simplified: Whether to provide simplified explanation for non-experts
+        page_images: List of page images
+        metadata: Paper metadata
+        api_key: Optional API key
+        pdf_bytes: Optional PDF bytes
         
     Returns:
-        Dictionary containing analysis results
+        Dictionary of analysis results by type
     """
-    start_time = time.time()
-    
-    # Try to fix bad metadata with LLM if needed
-    if metadata.get("title", "").replace("-", "").isdigit() or len(metadata.get("title", "")) < 5:
-        # Extract better metadata
-        logger.info("Attempting to extract better metadata with LLM")
-        better_metadata = extract_metadata_from_pdf(page_images, api_key)
-        # Update metadata
-        metadata.update(better_metadata)
-    
-    try:
-        # Get client with appropriate API key
-        client = get_client(api_key)
-        
-        # Determine if we should use the Pro model
-        use_pro = force_pro
-        
-        if not force_pro and AUTO_UPGRADE_TO_PRO:
-            # Check paper complexity to determine if we should upgrade to Pro
-            complexity = detect_paper_complexity(metadata, page_images)
-            metadata["estimated_complexity"] = complexity
-            
-            if complexity >= COMPLEXITY_THRESHOLD:
-                use_pro = True
-                
-        # Select model based on complexity determination
-        model_to_use = PRO_MODEL if use_pro else ACTIVE_MODEL
-        
-        # Get appropriate prompt based on analysis type
-        prompt_text = get_prompt(analysis_type, metadata, simplified)
-        
-        # Set up generation parameters
-        generation_config = types.GenerateContentConfig(
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-            temperature=TEMPERATURE,
-            top_p=TOP_P,
-            top_k=TOP_K
+    # Define tasks to run in parallel
+    tasks = {
+        "terminology": lambda: analyze_terminology(page_images, metadata, api_key),
+        "comprehensive": lambda: analyze_paper(page_images, metadata, "comprehensive", api_key, pdf_bytes),
+        "field_tags": lambda: get_field_tags(
+            metadata.get("title", ""), 
+            metadata.get("abstract", ""),
+            api_key
         )
-        
-        # Prepare content for the API
-        contents = []
-        processing_method = "unknown"
-        
-        # First add the text prompt
-        contents.append(prompt_text)
-        
-        # Try direct PDF processing if PDF bytes are available
-        if pdf_bytes is not None:
-            try:
-                logger.info("Attempting to process document as PDF")
-                # Add PDF as a Part using from_bytes method
-                contents.append(
-                    types.Part.from_bytes(
-                        data=pdf_bytes,
-                        mime_type="application/pdf"
-                    )
-                )
-                
-                # Generate content using the PDF
-                response = client.models.generate_content(
-                    model=model_to_use,
-                    contents=contents,
-                    config=generation_config
-                )
-                
-                processing_method = "direct_pdf"
-                logger.info("Successfully processed document as PDF")
-                
-            except Exception as e:
-                # If PDF processing fails, log the error and fall back to image-based approach
-                logger.warning(f"PDF processing failed: {str(e)}. Falling back to image-based approach.")
-                
-                # Reset contents for image-based approach
-                contents = [prompt_text]
-                
-                # Select number of pages based on model and paper length
-                max_pages = min(15, len(page_images))  # Default
-                
-                if "pro" in model_to_use:
-                    # Pro models can handle more pages
-                    max_pages = min(20, len(page_images))
-                
-                selected_images = page_images[:max_pages]
-                
-                # Then add each image using Part.from_bytes
-                for img in selected_images:
-                    # Convert PIL image to bytes
-                    img_byte_arr = io.BytesIO()
-                    img.save(img_byte_arr, format='PNG')
-                    img_bytes = img_byte_arr.getvalue()
-                    
-                    # Add image as a Part using from_bytes method
-                    contents.append(
-                        types.Part.from_bytes(
-                            data=img_bytes,
-                            mime_type="image/png"
-                        )
-                    )
-                
-                # Generate content using images
-                response = client.models.generate_content(
-                    model=model_to_use,
-                    contents=contents,
-                    config=generation_config
-                )
-                
-                processing_method = "image_based"
-                logger.info("Successfully processed document using images")
-        
-        else:
-            # No PDF bytes available, use image-based approach directly
-            logger.info("PDF bytes not available, using image-based approach")
-            
-            # Select number of pages based on model and paper length
-            max_pages = min(15, len(page_images))  # Default
-            
-            if "pro" in model_to_use:
-                # Pro models can handle more pages
-                max_pages = min(20, len(page_images))
-            
-            selected_images = page_images[:max_pages]
-            
-            # Then add each image using Part.from_bytes
-            for img in selected_images:
-                # Convert PIL image to bytes
-                img_byte_arr = io.BytesIO()
-                img.save(img_byte_arr, format='PNG')
-                img_bytes = img_byte_arr.getvalue()
-                
-                # Add image as a Part using from_bytes method
-                contents.append(
-                    types.Part.from_bytes(
-                        data=img_bytes,
-                        mime_type="image/png"
-                    )
-                )
-            
-            # Generate content using images
-            response = client.models.generate_content(
-                    model=model_to_use,
-                    contents=contents,
-                    config=generation_config
-                )
-            
-            processing_method = "image_based"
-            logger.info("Successfully processed document using images")
-        
-        # Process the response
-        result = {
-            "raw_analysis": response.text,
-            "analysis_type": analysis_type,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "model_used": model_to_use,
-            "processing_method": processing_method
-        }
-
-        # For simplified view
-        if simplified or analysis_type == "simplified":
-            result["simplified"] = response.text
-            
-        # Extract key definitions after analysis - but catch errors independently
-        try:
-            result["key_definitions"] = extract_key_definitions(response.text, api_key)
-        except Exception as e:
-            logger.error(f"Error extracting definitions (non-fatal): {str(e)}")
-            result["key_definitions"] = {}
-        
-        # For comprehensive analysis, extract structured sections
-        if analysis_type == "comprehensive":
-            # Extract sections from the response text using improved extraction
-            analysis_text = response.text
-            
-            # Define section headings for extraction
-            sections = {
-                "summary": ("SUMMARY", "KEY INNOVATIONS"),
-                "key_innovations": ("KEY INNOVATIONS", "TECHNIQUES"),
-                "techniques": ("TECHNIQUES", "PRACTICAL VALUE"),
-                "practical_value": ("PRACTICAL VALUE", "LIMITATIONS"),
-                "limitations": ("LIMITATIONS", None)
-            }
-            
-            # Extract each section with improved algorithm
-            for section_key, (start_marker, end_marker) in sections.items():
-                section_content = extract_section_improved(analysis_text, start_marker, end_marker)
-                if section_content:
-                    result[section_key] = section_content
-        
-        # Add processing metadata
-        result["processing_time"] = time.time() - start_time
-        
-        if processing_method == "direct_pdf":
-            # For PDF-based processing
-            result["pdf_processed"] = True
-        else:
-            # For image-based processing
-            result["pages_analyzed"] = len(selected_images)
-            result["total_pages"] = len(page_images)
-        
-        if AUTO_UPGRADE_TO_PRO:
-            result["paper_complexity"] = metadata.get("estimated_complexity", 0)
-            result["pro_model_triggered"] = use_pro
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Analysis failed: {str(e)}")
-        return {
-            "error": str(e),
-            "analysis_type": analysis_type,
-            "model_attempted": PRO_MODEL if force_pro else ACTIVE_MODEL,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "processing_time": time.time() - start_time
-        }
-
-def extract_section_improved(text: str, section_start: str, section_end: Optional[str]) -> str:
-    """
-    Extract a section from the text between section_start and section_end with improved formatting.
+    }
     
-    Args:
-        text: Full text content
-        section_start: Starting section header
-        section_end: Ending section header or None for last section
+    results = {}
+    
+    # Run tasks in parallel with a thread pool
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        # Submit all tasks
+        future_to_task = {
+            executor.submit(task_func): task_name 
+            for task_name, task_func in tasks.items()
+        }
         
-    Returns:
-        Extracted and cleaned section text
-    """
-    try:
-        # Find the section start
-        pattern = re.compile(f"(?:^|\n)[ ]*{re.escape(section_start)}[ ]*(?:$|\n)", re.MULTILINE)
-        match = pattern.search(text)
-        
-        if not match:
-            # Try alternate formats (e.g., ### SUMMARY)
-            pattern = re.compile(f"(?:^|\n)[ ]*#{{1,6}}[ ]*{re.escape(section_start)}[ ]*(?:$|\n)", re.MULTILINE)
-            match = pattern.search(text)
-            
-        if not match:
-            return ""
-            
-        start_idx = match.end()
-        
-        # Find the end of the section
-        if section_end:
-            end_pattern = re.compile(f"(?:^|\n)[ ]*(?:#{{{1,6}}}[ ]*)?{re.escape(section_end)}[ ]*(?:$|\n)", re.MULTILINE)
-            end_match = end_pattern.search(text, start_idx)
-            
-            if end_match:
-                end_idx = end_match.start()
-                section_text = text[start_idx:end_idx].strip()
-            else:
-                section_text = text[start_idx:].strip()
-        else:
-            # If no end marker, take until the end
-            section_text = text[start_idx:].strip()
-        
-        # Clean up formatting issues
-        # 1. Remove any lines that are just bullet markers
-        section_text = re.sub(r'^\s*[\*\-\•]\s*$', '', section_text, flags=re.MULTILINE)
-        
-        # 2. Fix bullet points for consistent formatting
-        section_text = re.sub(r'^\s*[\*\-\•]\s*', '* ', section_text, flags=re.MULTILINE)
-        
-        # 3. Fix extra newlines
-        section_text = re.sub(r'\n{3,}', '\n\n', section_text)
-        
-        # 4. Remove any markdown section numbering artifacts
-        section_text = re.sub(r'^\s*\d+\.\s+', '', section_text, flags=re.MULTILINE)
-        
-        # 5. Clean up bold/italic markdown issues
-        section_text = re.sub(r'\*{3,}', '**', section_text)
-        
-        return section_text.strip()
-        
-    except Exception as e:
-        logger.error(f"Error extracting section: {str(e)}")
-        return ""
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_task):
+            task_name = future_to_task[future]
+            try:
+                task_result = future.result()
+                results[task_name] = task_result
+            except Exception as e:
+                logger.error(f"Task {task_name} generated an exception: {str(e)}")
+                if task_name == "comprehensive":
+                    # For analysis tasks, create an error result
+                    results[task_name] = AnalysisResult(
+                        analysis_type=task_name,
+                        raw_analysis="",
+                        model_used="unknown",
+                        processing_time=0,
+                        error=str(e)
+                    )
+                else:
+                    # For other tasks, store an empty result
+                    results[task_name] = {} if task_name == "terminology" or task_name == "field_tags" else None
+    
+    return results

@@ -1,16 +1,134 @@
 import os
 import tempfile
-import urllib.request
-import fitz  # PyMuPDF
+import base64
+import logging
 import requests
 import arxiv
+import fitz  # PyMuPDF
 from PIL import Image
 import io
-from typing import Dict, List, Tuple, Optional
-import base64
+from typing import Dict, List, Tuple, Optional, Any, Union
+from dataclasses import dataclass
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class PaperContent:
+    """Data class for storing paper content and metadata"""
+    metadata: Dict[str, Any]
+    page_images: List[Image.Image]
+    pdf_bytes: Optional[bytes] = None
+    pdf_path: Optional[str] = None
+    error: Optional[str] = None
+    
+    @property
+    def is_valid(self) -> bool:
+        """Check if paper content is valid"""
+        return self.error is None and len(self.page_images) > 0
+    
+    @property
+    def page_count(self) -> int:
+        """Get the number of pages in the paper"""
+        return len(self.page_images)
+    
+    def get_pdf_base64(self) -> Optional[str]:
+        """Get PDF as base64 for embedding in HTML"""
+        if self.pdf_bytes:
+            return base64.b64encode(self.pdf_bytes).decode('utf-8')
+        elif self.pdf_path and os.path.exists(self.pdf_path):
+            with open(self.pdf_path, "rb") as file:
+                return base64.b64encode(file.read()).decode('utf-8')
+        return None
 
 
-def load_pdf_from_path(pdf_path: str) -> Tuple[List[Image.Image], Dict]:
+def extract_text_from_pdf(doc) -> Dict[str, str]:
+    """
+    Extract full text content from PDF document
+    
+    Args:
+        doc: PyMuPDF document
+        
+    Returns:
+        Dictionary with full text and first page text
+    """
+    full_text = ""
+    first_page_text = ""
+    
+    try:
+        # Extract text from all pages
+        for i, page in enumerate(doc):
+            page_text = page.get_text()
+            full_text += page_text
+            
+            # Save first page text separately
+            if i == 0:
+                first_page_text = page_text
+    except Exception as e:
+        logger.warning(f"Error extracting text from PDF: {str(e)}")
+    
+    return {
+        "full_text": full_text,
+        "first_page_text": first_page_text
+    }
+
+
+def fix_metadata_from_text(metadata: Dict[str, Any], text_data: Dict[str, str]) -> Dict[str, Any]:
+    """
+    Attempt to fix missing or incorrect metadata using extracted text
+    
+    Args:
+        metadata: Current metadata dictionary
+        text_data: Extracted text data
+        
+    Returns:
+        Updated metadata dictionary
+    """
+    # Check if title needs fixing
+    title = metadata.get("title", "").strip()
+    if not title or title == "Unknown Title" or title.replace("-", "").isdigit() or len(title) < 5:
+        # Try to extract title from first page text
+        first_page_lines = text_data.get("first_page_text", "").strip().split('\n')
+        
+        # Look for a suitable title candidate (non-empty line with reasonable length)
+        for line in first_page_lines:
+            line = line.strip()
+            if line and 5 <= len(line) <= 200 and not line.replace("-", "").isdigit():
+                # Skip lines that are likely not titles (emails, URLs, etc.)
+                if '@' in line or 'http' in line or line.count(' ') < 2:
+                    continue
+                    
+                metadata["title"] = line
+                break
+    
+    # Extract abstract if not present
+    if "abstract" not in metadata or not metadata["abstract"]:
+        full_text = text_data.get("full_text", "")
+        abstract_candidates = []
+        
+        # Look for abstract section markers
+        abstract_markers = ["abstract", "summary", "overview"]
+        lower_text = full_text.lower()
+        
+        for marker in abstract_markers:
+            if marker in lower_text:
+                # Find potential abstract text after marker
+                start_idx = lower_text.find(marker) + len(marker)
+                end_idx = min(start_idx + 1500, len(lower_text))  # Limit abstract length
+                
+                # Extract text chunk that might contain abstract
+                chunk = full_text[start_idx:end_idx].strip()
+                abstract_candidates.append(chunk)
+        
+        # Use the shortest candidate as it's more likely to be just the abstract
+        if abstract_candidates:
+            metadata["abstract"] = min(abstract_candidates, key=len)
+    
+    return metadata
+
+
+def load_pdf_from_path(pdf_path: str) -> PaperContent:
     """
     Load a PDF from a file path and extract pages as images and metadata.
     
@@ -18,9 +136,13 @@ def load_pdf_from_path(pdf_path: str) -> Tuple[List[Image.Image], Dict]:
         pdf_path: Path to the PDF file
         
     Returns:
-        Tuple of (list of page images, metadata dictionary)
+        PaperContent object with images and metadata
     """
     try:
+        # Read PDF bytes for future use
+        with open(pdf_path, "rb") as file:
+            pdf_bytes = file.read()
+            
         # Open the PDF
         doc = fitz.open(pdf_path)
         
@@ -32,22 +154,43 @@ def load_pdf_from_path(pdf_path: str) -> Tuple[List[Image.Image], Dict]:
             "filename": os.path.basename(pdf_path)
         }
         
-        # Extract pages as images
+        # Extract text content
+        text_data = extract_text_from_pdf(doc)
+        
+        # Try to fix metadata using extracted text
+        metadata = fix_metadata_from_text(metadata, text_data)
+        
+        # Extract pages as images with optimized resolution
         page_images = []
+        resolution = 150  # DPI for images - lower than before for better performance
+        
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
-            pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))  # 300 DPI
+            pix = page.get_pixmap(matrix=fitz.Matrix(resolution/72, resolution/72))
             img_data = pix.tobytes("png")
             img = Image.open(io.BytesIO(img_data))
             page_images.append(img)
             
-        return page_images, metadata
+        result = PaperContent(
+            metadata=metadata,
+            page_images=page_images,
+            pdf_bytes=pdf_bytes,
+            pdf_path=pdf_path
+        )
+        
+        return result
         
     except Exception as e:
-        raise Exception(f"Error loading PDF: {str(e)}")
+        error_msg = f"Error loading PDF: {str(e)}"
+        logger.error(error_msg)
+        return PaperContent(
+            metadata={"title": "Error Loading PDF", "error": str(e)},
+            page_images=[],
+            error=error_msg
+        )
 
 
-def load_pdf_from_arxiv(arxiv_id: str) -> Tuple[List[Image.Image], Dict]:
+def load_pdf_from_arxiv(arxiv_id: str) -> PaperContent:
     """
     Download and load a PDF from arXiv using its ID.
     
@@ -55,7 +198,7 @@ def load_pdf_from_arxiv(arxiv_id: str) -> Tuple[List[Image.Image], Dict]:
         arxiv_id: arXiv identifier (e.g., '2303.08774')
         
     Returns:
-        Tuple of (list of page images, metadata dictionary)
+        PaperContent object with images and metadata
     """
     try:
         # Strip version number if present
@@ -63,40 +206,58 @@ def load_pdf_from_arxiv(arxiv_id: str) -> Tuple[List[Image.Image], Dict]:
         
         # Search for the paper
         search = arxiv.Search(id_list=[base_id])
-        paper = next(search.results())
+        results = list(search.results())
+        
+        if not results:
+            error_msg = f"No paper found with arXiv ID: {arxiv_id}"
+            return PaperContent(
+                metadata={"title": "Paper Not Found", "error": error_msg},
+                page_images=[],
+                error=error_msg
+            )
+            
+        paper = results[0]
         
         # Create a temporary directory to save the PDF
         temp_dir = tempfile.mkdtemp()
-        safe_title = paper.title.replace(' ', '_').replace('/', '_')
         pdf_path = os.path.join(temp_dir, f"{base_id}.pdf")
         
         # Download the PDF
         paper.download_pdf(filename=pdf_path)
         
-        # Load the PDF
-        page_images, file_metadata = load_pdf_from_path(pdf_path)
-        
-        # Add arXiv metadata
-        metadata = {
+        # Gather arXiv metadata before loading
+        arxiv_metadata = {
             "title": paper.title,
             "author": ', '.join(author.name for author in paper.authors),
             "abstract": paper.summary,
             "url": paper.pdf_url,
             "published": paper.published.strftime("%Y-%m-%d") if paper.published else "Unknown",
             "arxiv_id": arxiv_id,
-            "page_count": file_metadata["page_count"]
+            "source": "arxiv"
         }
         
-        # Clean up the temporary files
-        os.remove(pdf_path)
-        os.rmdir(temp_dir)
+        # Load the PDF
+        paper_content = load_pdf_from_path(pdf_path)
         
-        return page_images, metadata
+        # Update with arXiv metadata (taking precedence over PDF metadata)
+        paper_content.metadata.update(arxiv_metadata)
+        
+        # Clean up temporary files when done (but keep the PDF path reference)
+        # We'll clean up the files later after processing
+        
+        return paper_content
+        
     except Exception as e:
-        raise Exception(f"Error loading PDF from arXiv: {str(e)}")
+        error_msg = f"Error loading PDF from arXiv: {str(e)}"
+        logger.error(error_msg)
+        return PaperContent(
+            metadata={"title": "Error Loading arXiv Paper", "error": str(e)},
+            page_images=[],
+            error=error_msg
+        )
 
 
-def load_pdf_from_url(url: str) -> Tuple[List[Image.Image], Dict]:
+def load_pdf_from_url(url: str) -> PaperContent:
     """
     Download and load a PDF from a URL.
     
@@ -104,65 +265,112 @@ def load_pdf_from_url(url: str) -> Tuple[List[Image.Image], Dict]:
         url: URL to the PDF file
         
     Returns:
-        Tuple of (list of page images, metadata dictionary)
+        PaperContent object with images and metadata
     """
     try:
         # Create a temporary file to save the PDF
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
-            # Download the PDF
-            response = requests.get(url, stream=True)
-            response.raise_for_status()  # Raise an exception for HTTP errors
+        tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
+        tmp_path = tmp.name
+        
+        # Download the PDF with proper error handling
+        try:
+            # Set timeout and user agent
+            headers = {
+                'User-Agent': 'Mozilla/5.0 PaperBuddy PDF Downloader'
+            }
+            response = requests.get(url, stream=True, headers=headers, timeout=30)
+            response.raise_for_status()  # Raise exception for HTTP errors
+            
+            # Check content type to confirm it's a PDF
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'pdf' not in content_type and not url.lower().endswith('.pdf'):
+                raise ValueError(f"URL does not point to a PDF file. Content-Type: {content_type}")
             
             # Save the PDF to the temporary file
             for chunk in response.iter_content(chunk_size=8192):
                 tmp.write(chunk)
             
-            tmp_path = tmp.name
+            tmp.close()
+            
+            # Get content as bytes for future use
+            with open(tmp_path, "rb") as file:
+                pdf_bytes = file.read()
+                
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to download PDF: {str(e)}")
         
         # Load the PDF
-        page_images, metadata = load_pdf_from_path(tmp_path)
+        paper_content = load_pdf_from_path(tmp_path)
         
         # Add URL to metadata
-        metadata["url"] = url
+        paper_content.metadata["url"] = url
+        paper_content.metadata["source"] = "url"
+        paper_content.pdf_bytes = pdf_bytes
         
-        # Clean up the temporary file
-        os.unlink(tmp_path)
-        
-        return page_images, metadata
+        return paper_content
         
     except Exception as e:
-        raise Exception(f"Error loading PDF from URL: {str(e)}")
+        error_msg = f"Error loading PDF from URL: {str(e)}"
+        logger.error(error_msg)
+        return PaperContent(
+            metadata={"title": "Error Loading PDF from URL", "error": str(e)},
+            page_images=[],
+            error=error_msg
+        )
+    finally:
+        # Always clean up the temporary file
+        try:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception as e:
+            logger.warning(f"Failed to clean up temporary file: {str(e)}")
 
 
-def encode_image_for_api(image: Image.Image) -> str:
+def get_embedded_pdf_viewer(paper_content: PaperContent, height: int = 800) -> Optional[str]:
     """
-    Encode an image as base64 for API requests.
+    Generate HTML for an embedded PDF viewer
     
     Args:
-        image: PIL Image object
+        paper_content: PaperContent object
+        height: Height of the PDF viewer in pixels
         
     Returns:
-        Base64 encoded string
+        HTML string for the PDF viewer or None if PDF is not available
     """
-    buffered = io.BytesIO()
-    image.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-def extract_title_from_pdf(doc):
-    """Attempt to extract a readable title from PDF metadata or content"""
-    # Try to get from metadata
-    meta_title = doc.metadata.get("title", "")
+    base64_pdf = paper_content.get_pdf_base64()
     
-    # If metadata title looks like ISBN or is empty, try to extract from first page
-    if not meta_title or meta_title.replace("-", "").isdigit() or len(meta_title) < 3:
-        # Try to extract from first page text
-        first_page = doc.load_page(0)
-        text = first_page.get_text()
+    if not base64_pdf:
+        return None
         
-        # Use first non-empty line that's not numbers/symbols as title
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        for line in lines:
-            if len(line) > 10 and not line.replace("-", "").isdigit() and not all(c.isdigit() or c.isspace() or c in ':-.' for c in line):
-                return line
+    # Create an iframe with the PDF viewer
+    pdf_display = f"""
+    <div style="display: flex; justify-content: center; width: 100%;">
+        <iframe 
+            src="data:application/pdf;base64,{base64_pdf}" 
+            width="100%" 
+            height="{height}px" 
+            style="border: none; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
+        </iframe>
+    </div>
+    """
     
-    return meta_title if meta_title else "Unknown Title"
+    return pdf_display
+
+
+def cleanup_temporary_files(paper_content: PaperContent) -> None:
+    """
+    Clean up any temporary files associated with the paper content
+    
+    Args:
+        paper_content: PaperContent object
+    """
+    try:
+        if paper_content.pdf_path and os.path.exists(paper_content.pdf_path):
+            os.unlink(paper_content.pdf_path)
+            
+            # Also remove parent directory if it's a temp dir and now empty
+            parent_dir = os.path.dirname(paper_content.pdf_path)
+            if os.path.exists(parent_dir) and not os.listdir(parent_dir):
+                os.rmdir(parent_dir)
+    except Exception as e:
+        logger.warning(f"Failed to clean up temporary files: {str(e)}")
