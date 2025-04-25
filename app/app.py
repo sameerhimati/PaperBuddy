@@ -1,14 +1,12 @@
 import streamlit as st
-import time
 import os
 import sys
 import tempfile
-import json
-import base64
 from datetime import datetime
 import concurrent.futures
 from PIL import Image
 import io
+import re
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +25,12 @@ from utils.ai_analysis import (
     analyze_terminology,
     get_field_tags,
     process_paper_with_parallel_analysis
+)
+from utils.display import (
+    display_terminology,
+    ProgressManager,
+    extract_ratings_from_text,
+    rating_badge
 )
 from config import (
     CUSTOM_CSS,
@@ -58,16 +62,13 @@ def initialize_session_state():
         "user_api_key": None,
         "model_choice": UI_SETTINGS["default_model"],
         "processing": False,
-        "progress_status": {},
         "last_action": None,
         "paper_processed": False,
-        "terminology_paper_id": None,
         "field_tags": {},
         "terminology_loaded": False,
-        "last_upload_id": None,  # Track the last uploaded file by ID
+        "last_upload_id": None,
         "tab_index": 0,
-        "switch_to_analysis": False,  # Flag to explicitly handle tab switching
-        "file_uploaded": False  # Flag to track if a file has been uploaded
+        "analyses_running": False
     }
     
     for key, default_value in defaults.items():
@@ -77,69 +78,6 @@ def initialize_session_state():
     # Ensure nested structure in analysis_results exists
     if "terminology" not in st.session_state.analysis_results:
         st.session_state.analysis_results["terminology"] = {}
-
-
-class ProgressManager:
-    """Manage progress display with detailed steps"""
-    
-    def __init__(self, total_steps=5, key_prefix=""):
-        self.container = st.empty()
-        self.progress_bar = None
-        self.status_text = None
-        self.total_steps = total_steps
-        self.current_step = 0
-        self.key_prefix = key_prefix
-        self._create_elements()
-    
-    def _create_elements(self):
-        """Create progress elements"""
-        with self.container.container():
-            self.progress_bar = st.progress(0)
-            self.status_text = st.empty()
-    
-    def update(self, message, step=None):
-        """Update progress with message"""
-        if step is not None:
-            self.current_step = step
-        else:
-            self.current_step += 1
-        
-        progress_value = min(self.current_step / self.total_steps, 1.0)
-        self.progress_bar.progress(progress_value)
-        self.status_text.info(message)
-        
-        # Also update session state for persistence
-        st.session_state.progress_status[self.key_prefix] = {
-            "message": message,
-            "progress": progress_value
-        }
-    
-    def complete(self, success=True, message="Completed successfully!"):
-        """Mark process as complete"""
-        self.progress_bar.progress(1.0)
-        if success:
-            self.status_text.success(message)
-        else:
-            self.status_text.error(message)
-            
-        # Update session state
-        st.session_state.progress_status[self.key_prefix] = {
-            "message": message,
-            "progress": 1.0,
-            "success": success,
-            "complete": True
-        }
-        
-        # Auto-clear after delay
-        time.sleep(2)
-        self.clear()
-    
-    def clear(self):
-        """Clear the progress elements"""
-        self.container.empty()
-        # Remove from session state
-        if self.key_prefix in st.session_state.progress_status:
-            del st.session_state.progress_status[self.key_prefix]
 
 
 def display_paper_metadata(paper_content):
@@ -191,31 +129,6 @@ def display_paper_metadata(paper_content):
     st.markdown("---")
 
 
-def display_terminology(terminology):
-    """Display terminology definitions in cards"""
-    if not terminology:
-        st.info("No terminology definitions available yet. They will appear here after analysis.")
-        return
-    
-    st.markdown("## 🔑 Key Terminology")
-    
-    # Create grid layout 
-    num_terms = len(terminology)
-    num_cols = min(3, max(1, num_terms))
-    cols = st.columns(num_cols)
-    
-    for i, (term, info) in enumerate(terminology.items()):
-        with cols[i % num_cols]:
-            # Create a card-style expander for each term
-            with st.expander(term):
-                st.markdown(f"**Definition:** {info.get('definition', 'No definition available')}")
-                
-                if 'explanation' in info:
-                    st.markdown(f"**Simplified:** {info.get('explanation')}")
-    
-    st.markdown("---")
-
-
 def display_analysis_selector(analysis_types, current_type):
     """Display analysis type selector"""
     # Format options for display
@@ -263,41 +176,6 @@ def display_model_selector(models, current_model):
     return selected
 
 
-def extract_ratings(text):
-    """Extract numerical ratings from text with their context"""
-    import re
-    
-    # Look for patterns like "Rating: 7/10" or "Rating 7/10" or "(7/10)"
-    patterns = [
-        r'Rating:?\s*(\d+)[/]10(.*?)(?=\n|$)',
-        r'\((\d+)[/]10\)(.*?)(?=\n|$)'
-    ]
-    
-    ratings = []
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.MULTILINE)
-        for match in matches:
-            if len(match) >= 2:
-                rating = int(match[0])
-                context = match[1].strip()
-                ratings.append((rating, context))
-    
-    return ratings
-
-
-def get_rating_html(rating):
-    """Get HTML for displaying a rating with appropriate styling"""
-    if rating <= 3:
-        cls = "rating-low"
-    elif rating <= 6:
-        cls = "rating-medium"
-    else:
-        cls = "rating-high"
-        
-    return f'<span class="rating {cls}">{rating}/10</span>'
-
-
 def display_analysis_results_tabbed(result):
     """Display analysis results in a tabbed interface"""
     if not result or result.error:
@@ -313,7 +191,7 @@ def display_analysis_results_tabbed(result):
     # Get ratings from sections
     ratings = {}
     for section_name, section_text in result.sections.items():
-        section_ratings = extract_ratings(section_text)
+        section_ratings = extract_ratings_from_text(section_text)
         if section_ratings:
             for rating, context in section_ratings:
                 ratings[section_name] = (rating, context)
@@ -342,7 +220,7 @@ def display_analysis_results_tabbed(result):
             # Add rating badge if available
             if "key_innovations" in ratings:
                 rating, context = ratings["key_innovations"]
-                st.markdown(f'<p>Innovation Score: {get_rating_html(rating)} {context}</p>', unsafe_allow_html=True)
+                st.markdown(f'<p>Innovation Score: {rating_badge(rating)} {context}</p>', unsafe_allow_html=True)
             st.markdown(innovations)
         else:
             st.info("No specific innovations section found in the analysis.")
@@ -354,7 +232,7 @@ def display_analysis_results_tabbed(result):
             # Add rating badge if available
             if "techniques" in ratings:
                 rating, context = ratings["techniques"]
-                st.markdown(f'<p>Technical Score: {get_rating_html(rating)} {context}</p>', unsafe_allow_html=True)
+                st.markdown(f'<p>Technical Score: {rating_badge(rating)} {context}</p>', unsafe_allow_html=True)
             st.markdown(techniques)
         else:
             st.info("No specific techniques section found in the analysis.")
@@ -366,7 +244,7 @@ def display_analysis_results_tabbed(result):
             # Add rating badge if available
             if "practical_value" in ratings:
                 rating, context = ratings["practical_value"]
-                st.markdown(f'<p>Practical Value: {get_rating_html(rating)} {context}</p>', unsafe_allow_html=True)
+                st.markdown(f'<p>Practical Value: {rating_badge(rating)} {context}</p>', unsafe_allow_html=True)
             st.markdown(applications)
         else:
             st.info("No specific applications section found in the analysis.")
@@ -424,7 +302,7 @@ def display_raw_analysis(result):
 
 def process_paper_upload(uploaded_file):
     """Process uploaded PDF file"""
-    progress = ProgressManager(total_steps=4, key_prefix="upload")
+    progress = ProgressManager(total_steps=5, key_prefix="upload")
     progress.update("Uploading PDF...", step=1)
     
     try:
@@ -439,7 +317,49 @@ def process_paper_upload(uploaded_file):
             progress.complete(False, f"Error loading PDF: {paper_content.error}")
             return None
         
-        progress.update("Extracting research fields...", step=3)
+        progress.update("Enriching metadata with AI...", step=3)
+        
+        # Use LLM to extract metadata if not available
+        api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
+        
+        # Only run initial analysis if title/author/abstract are not well-defined
+        title = paper_content.metadata.get('title', '')
+        author = paper_content.metadata.get('author', '')
+        
+        if title == "Unknown Title" or author == "Unknown Author" or 'abstract' not in paper_content.metadata:
+            # Use first 2 pages for metadata extraction
+            initial_results = process_paper_with_parallel_analysis(
+                paper_content.page_images[:min(2, len(paper_content.page_images))],
+                paper_content.metadata,
+                api_key,
+                paper_content.pdf_bytes,
+                analysis_types=["quick_summary"]  # Only run quick summary to extract basic info
+            )
+            
+            if "quick_summary" in initial_results and initial_results["quick_summary"].is_successful:
+                # Extract title and authors if they were not available
+                summary = initial_results["quick_summary"].raw_analysis
+                
+                # First line is often the title in summaries
+                if title == "Unknown Title" and summary:
+                    lines = summary.split('\n')
+                    if lines and len(lines[0]) > 5 and len(lines[0]) < 200:
+                        paper_content.metadata["title"] = lines[0].strip()
+                
+                # Look for author mentions
+                if author == "Unknown Author" and "author" in summary.lower():
+                    author_match = re.search(r'(?:by|author[s]?:?)\s+([^\.]+)', summary, re.IGNORECASE)
+                    if author_match:
+                        paper_content.metadata["author"] = author_match.group(1).strip()
+                
+                # Look for abstract-like content
+                if 'abstract' not in paper_content.metadata:
+                    # Use the first paragraph as a pseudo-abstract
+                    paragraphs = re.split(r'\n\s*\n', summary)
+                    if len(paragraphs) > 1 and len(paragraphs[1]) > 30:
+                        paper_content.metadata["abstract"] = paragraphs[1].strip()
+        
+        progress.update("Extracting research fields...", step=4)
         
         # Extract field tags
         title = paper_content.metadata.get('title', '')
@@ -449,14 +369,13 @@ def process_paper_upload(uploaded_file):
             st.session_state.field_tags = get_field_tags(
                 title, 
                 abstract,
-                st.session_state.user_api_key if 'user_api_key' in st.session_state else None
+                api_key
             )
         
-        progress.update("Extracting terminology...", step=4)
+        progress.update("Extracting terminology...", step=5)
         
-        # Extract terminology only once for this paper
+        # Extract terminology
         try:
-            api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
             terminology = analyze_terminology(
                 paper_content.page_images[:min(3, len(paper_content.page_images))],
                 paper_content.metadata,
@@ -470,6 +389,9 @@ def process_paper_upload(uploaded_file):
             print(f"Error extracting terminology: {str(e)}")
         
         progress.complete(True, "Paper loaded successfully!")
+        
+        # Schedule automatic parallel analysis
+        st.session_state.analyses_running = True
         
         return paper_content
         
@@ -491,7 +413,7 @@ def process_arxiv_import(arxiv_id):
     if st.session_state.last_action == f"arxiv_{arxiv_id}" and st.session_state.paper_processed:
         return st.session_state.paper_content
         
-    progress = ProgressManager(total_steps=4, key_prefix="arxiv")
+    progress = ProgressManager(total_steps=3, key_prefix="arxiv")
     progress.update("Validating arXiv ID...", step=1)
     
     try:
@@ -514,51 +436,48 @@ def process_arxiv_import(arxiv_id):
             progress.complete(False, f"Error loading paper from arXiv: {paper_content.error}")
             return None
         
-        progress.update("Extracting research fields...", step=3)
+        progress.update("Processing paper metadata...", step=3)
         
-        # Generate a unique ID for this paper
-        paper_id = f"{paper_content.metadata.get('title', '')}_{paper_content.metadata.get('author', '')}"
-        
-        # Field tags should already be in the arXiv metadata
+        # Extract field tags
         title = paper_content.metadata.get('title', '')
         abstract = paper_content.metadata.get('abstract', '')
+        api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
         
         if len(title) > 5 and len(abstract) > 20:
             st.session_state.field_tags = get_field_tags(
                 title, 
                 abstract,
-                st.session_state.user_api_key if 'user_api_key' in st.session_state else None
+                api_key
             )
         
-        progress.update("Extracting terminology...", step=4)
-        
-        # Only extract terminology if it's a different paper than before
-        if st.session_state.terminology_paper_id != paper_id:
-            try:
-                api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
-                terminology = analyze_terminology(
-                    paper_content.page_images[:min(3, len(paper_content.page_images))],
-                    paper_content.metadata,
-                    api_key
-                )
-                
-                if terminology:
-                    st.session_state.analysis_results["terminology"] = terminology
-                    st.session_state.terminology_loaded = True
-                    st.session_state.terminology_paper_id = paper_id
-            except Exception as e:
-                print(f"Error extracting terminology: {str(e)}")
+        # Extract terminology
+        try:
+            terminology = analyze_terminology(
+                paper_content.page_images[:min(3, len(paper_content.page_images))],
+                paper_content.metadata,
+                api_key
+            )
+            
+            if terminology:
+                st.session_state.analysis_results["terminology"] = terminology
+                st.session_state.terminology_loaded = True
+        except Exception as e:
+            print(f"Error extracting terminology: {str(e)}")
         
         progress.complete(True, "Paper loaded successfully!")
         
         # Mark that we've successfully processed this paper
         st.session_state.paper_processed = True
         
+        # Schedule automatic parallel analysis
+        st.session_state.analyses_running = True
+        
         return paper_content
         
     except Exception as e:
         progress.complete(False, f"Error processing arXiv paper: {str(e)}")
         return None
+
 
 def process_url_import(url):
     """Process URL import"""
@@ -587,10 +506,49 @@ def process_url_import(url):
             progress.complete(False, f"Error downloading PDF: {paper_content.error}")
             return None
         
-        progress.update("Extracting research fields...", step=3)
+        progress.update("Enriching metadata with AI...", step=3)
         
-        # Generate a unique ID for this paper
-        paper_id = f"{paper_content.metadata.get('title', '')}_{paper_content.metadata.get('author', '')}"
+        # Use LLM to extract metadata if not available
+        api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
+        
+        # Only run initial analysis if title/author/abstract are not well-defined
+        title = paper_content.metadata.get('title', '')
+        author = paper_content.metadata.get('author', '')
+        
+        if title == "Unknown Title" or author == "Unknown Author" or 'abstract' not in paper_content.metadata:
+            # Use first 2 pages for metadata extraction
+            initial_results = process_paper_with_parallel_analysis(
+                paper_content.page_images[:min(2, len(paper_content.page_images))],
+                paper_content.metadata,
+                api_key,
+                paper_content.pdf_bytes,
+                analysis_types=["quick_summary"]  # Only run quick summary to extract basic info
+            )
+            
+            if "quick_summary" in initial_results and initial_results["quick_summary"].is_successful:
+                # Extract title and authors if they were not available
+                summary = initial_results["quick_summary"].raw_analysis
+                
+                # First line is often the title in summaries
+                if title == "Unknown Title" and summary:
+                    lines = summary.split('\n')
+                    if lines and len(lines[0]) > 5 and len(lines[0]) < 200:
+                        paper_content.metadata["title"] = lines[0].strip()
+                
+                # Look for author mentions
+                if author == "Unknown Author" and "author" in summary.lower():
+                    author_match = re.search(r'(?:by|author[s]?:?)\s+([^\.]+)', summary, re.IGNORECASE)
+                    if author_match:
+                        paper_content.metadata["author"] = author_match.group(1).strip()
+                
+                # Look for abstract-like content
+                if 'abstract' not in paper_content.metadata:
+                    # Use the first paragraph as a pseudo-abstract
+                    paragraphs = re.split(r'\n\s*\n', summary)
+                    if len(paragraphs) > 1 and len(paragraphs[1]) > 30:
+                        paper_content.metadata["abstract"] = paragraphs[1].strip()
+        
+        progress.update("Extracting research fields and terminology...", step=4)
         
         # Extract field tags
         title = paper_content.metadata.get('title', '')
@@ -600,32 +558,30 @@ def process_url_import(url):
             st.session_state.field_tags = get_field_tags(
                 title, 
                 abstract,
-                st.session_state.user_api_key if 'user_api_key' in st.session_state else None
+                api_key
             )
         
-        progress.update("Extracting terminology...", step=4)
-        
-        # Only extract terminology if it's a different paper than before
-        if st.session_state.terminology_paper_id != paper_id:
-            try:
-                api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
-                terminology = analyze_terminology(
-                    paper_content.page_images[:min(3, len(paper_content.page_images))],
-                    paper_content.metadata,
-                    api_key
-                )
-                
-                if terminology:
-                    st.session_state.analysis_results["terminology"] = terminology
-                    st.session_state.terminology_loaded = True
-                    st.session_state.terminology_paper_id = paper_id
-            except Exception as e:
-                print(f"Error extracting terminology: {str(e)}")
+        # Extract terminology
+        try:
+            terminology = analyze_terminology(
+                paper_content.page_images[:min(3, len(paper_content.page_images))],
+                paper_content.metadata,
+                api_key
+            )
+            
+            if terminology:
+                st.session_state.analysis_results["terminology"] = terminology
+                st.session_state.terminology_loaded = True
+        except Exception as e:
+            print(f"Error extracting terminology: {str(e)}")
         
         progress.complete(True, "Paper loaded successfully!")
         
         # Mark that we've successfully processed this paper
         st.session_state.paper_processed = True
+        
+        # Schedule automatic parallel analysis
+        st.session_state.analyses_running = True
         
         return paper_content
         
@@ -634,70 +590,57 @@ def process_url_import(url):
         return None
 
 
-def run_paper_analysis():
-    """Run analysis on current paper"""
+def run_parallel_analysis():
+    """Run parallel analysis on current paper in background"""
     if not st.session_state.paper_content or not st.session_state.paper_content.is_valid:
-        st.error("Please load a paper first")
         return
     
-    analysis_type = st.session_state.current_analysis_type
-    model_choice = st.session_state.model_choice
+    # Get API key
+    api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
     
-    # Check for Pro model without API key
-    if model_choice == "pro" and not st.session_state.user_api_key:
-        st.warning("Pro model requires your API key. Please add it in the sidebar.")
-        model_choice = "default"  # Fallback to default
-    
-    progress = ProgressManager(total_steps=3, key_prefix="analysis")
-    progress.update("Preparing paper for analysis...", step=1)
+    # Create a progress manager
+    progress = ProgressManager(total_steps=3, key_prefix="parallel_analysis")
+    progress.update("Starting parallel paper analysis...", step=1)
     
     try:
-        # Prepare analysis
-        paper_content = st.session_state.paper_content
+        # Get available analysis types
+        analysis_types = get_analysis_types()
+        analysis_list = list(analysis_types.keys())
         
-        progress.update(f"Analyzing with {model_choice} model...", step=2)
+        # Run analyses in parallel
+        progress.update("Running multiple analysis types...", step=2)
         
-        # Run analysis
-        result = analyze_paper(
-            paper_content.page_images,
-            paper_content.metadata,
-            analysis_type,
-            st.session_state.user_api_key,
-            pdf_bytes=paper_content.pdf_bytes,
-            simplified=(analysis_type == "simplified")
+        results = process_paper_with_parallel_analysis(
+            st.session_state.paper_content.page_images,
+            st.session_state.paper_content.metadata,
+            api_key,
+            st.session_state.paper_content.pdf_bytes,
+            analysis_types=analysis_list
         )
         
-        # Store result
-        st.session_state.analysis_results[analysis_type] = result
+        # Store results in session state
+        for analysis_type, result in results.items():
+            if analysis_type in ["field_tags", "terminology"]:
+                continue  # These were already processed separately
+                
+            st.session_state.analysis_results[analysis_type] = result
         
-        progress.update("Processing results...", step=3)
+        progress.update("Completing analysis...", step=3)
+        progress.complete(True, f"Completed {len(analysis_list)} analyses!")
         
-        # If we don't have terminology yet, try to extract from this analysis
-        if not st.session_state.terminology_loaded and result.is_successful:
-            from utils.ai_analysis import extract_key_definitions
-            
-            terminology = extract_key_definitions(result.raw_analysis)
-            if terminology:
-                st.session_state.analysis_results["terminology"] = terminology
-                st.session_state.terminology_loaded = True
+        # Flag that analyses are complete
+        st.session_state.analyses_running = False
         
-        progress.complete(True, "Analysis complete!")
-        
-        return result
+        # Request app rerun to display results
+        st.rerun()
         
     except Exception as e:
-        progress.complete(False, f"Error during analysis: {str(e)}")
-        return None
+        progress.complete(False, f"Error during parallel analysis: {str(e)}")
+
 
 def show_import_interface():
     """Show paper import interface"""
     st.markdown("## Import Paper")
-    
-    # Check for tab switching request
-    if st.session_state.switch_to_analysis and st.session_state.paper_content:
-        st.session_state.tab_index = 1  # Switch to Analysis tab
-        st.session_state.switch_to_analysis = False
-        st.rerun()  # Force rerun to apply tab change
     
     # Tab-based input method selection
     tab1, tab2, tab3 = st.tabs(["Upload PDF", "arXiv ID", "PDF URL"])
@@ -716,17 +659,18 @@ def show_import_interface():
                 
                 # Clear previous state
                 st.session_state.paper_content = None
+                st.session_state.analysis_results = {"terminology": {}}
                 
                 # Process the file
                 paper_content = process_paper_upload(uploaded_file)
                 
                 if paper_content and paper_content.is_valid:
                     st.session_state.paper_content = paper_content
-                    st.session_state.file_uploaded = True
-                    st.session_state.switch_to_analysis = True
                     
                     # Add a message to confirm loading
                     st.success("Paper loaded successfully! Switching to Analysis tab...")
+                    # Switch to analysis tab
+                    st.session_state.tab_index = 1
                     # Force a rerun to apply the state changes
                     st.rerun()
     
@@ -737,15 +681,20 @@ def show_import_interface():
         if arxiv_id and fetch_button:
             # Process the arXiv ID
             with st.spinner(f"Fetching paper with arXiv ID: {arxiv_id}..."):
+                # Clear previous state
+                st.session_state.paper_content = None
+                st.session_state.analysis_results = {"terminology": {}}
+                
                 paper_content = process_arxiv_import(arxiv_id)
                 
                 if paper_content and paper_content.is_valid:
                     st.session_state.paper_content = paper_content
                     st.session_state.last_upload_id = f"arxiv_{arxiv_id}"
-                    st.session_state.switch_to_analysis = True
                     
                     # Add a message to confirm loading
                     st.success("Paper loaded successfully! Switching to Analysis tab...")
+                    # Switch to analysis tab
+                    st.session_state.tab_index = 1
                     # Force a rerun to apply the state changes
                     st.rerun()
     
@@ -756,17 +705,23 @@ def show_import_interface():
         if pdf_url and url_button:
             # Process the URL
             with st.spinner(f"Fetching paper from URL: {pdf_url}..."):
+                # Clear previous state
+                st.session_state.paper_content = None
+                st.session_state.analysis_results = {"terminology": {}}
+                
                 paper_content = process_url_import(pdf_url)
                 
                 if paper_content and paper_content.is_valid:
                     st.session_state.paper_content = paper_content
                     st.session_state.last_upload_id = f"url_{pdf_url}"
-                    st.session_state.switch_to_analysis = True
                     
                     # Add a message to confirm loading
                     st.success("Paper loaded successfully! Switching to Analysis tab...")
+                    # Switch to analysis tab 
+                    st.session_state.tab_index = 1
                     # Force a rerun to apply the state changes
                     st.rerun()
+
 
 def show_analysis_interface():
     """Show paper analysis interface"""
@@ -776,14 +731,17 @@ def show_analysis_interface():
         st.info("Please import a paper first using the Import Paper tab.")
         return
     
-    # Add debug message to check if we're reaching this point
-    if UI_SETTINGS.get("show_debug_info", False):
-        st.write("DEBUG: Analysis tab reached with valid paper content")
+    # Check if we need to run parallel analysis
+    if st.session_state.analyses_running:
+        # Show a placeholder while analyses are running
+        with st.spinner("Running comprehensive analysis of the paper..."):
+            # Run the analyses
+            run_parallel_analysis()
     
     # Display paper metadata
     display_paper_metadata(paper_content)
     
-    # Display terminology if available - with more robust checking
+    # Display terminology if available
     if "terminology" in st.session_state.analysis_results and st.session_state.analysis_results["terminology"]:
         display_terminology(st.session_state.analysis_results["terminology"])
     
@@ -812,18 +770,29 @@ def show_analysis_interface():
                 st.session_state.model_choice = new_model
                 st.rerun()
         
-        # Analyze button
-        analyze_button = st.button(
-            "🚀 Analyze Paper", 
-            use_container_width=True, 
-            type="primary",
-            key="analyze_button"
-        )
-        
-        # Run analysis if button clicked
-        if analyze_button:
-            run_paper_analysis()
-            st.rerun()
+        # Analyze button - only needed if the analysis doesn't exist yet
+        current_type = st.session_state.current_analysis_type
+        if current_type not in st.session_state.analysis_results:
+            analyze_button = st.button(
+                "🚀 Analyze Paper", 
+                use_container_width=True, 
+                type="primary",
+                key="analyze_button"
+            )
+            
+            # Run analysis if button clicked
+            if analyze_button:
+                with st.spinner(f"Performing {current_type} analysis..."):
+                    api_key = st.session_state.user_api_key
+                    result = analyze_paper(
+                        paper_content.page_images,
+                        paper_content.metadata,
+                        current_type,
+                        api_key,
+                        pdf_bytes=paper_content.pdf_bytes
+                    )
+                    st.session_state.analysis_results[current_type] = result
+                    st.rerun()
     
     with col2:
         # Display PDF viewer
@@ -877,6 +846,7 @@ def show_analysis_interface():
                 )
                 
                 # Download as JSON
+                import json
                 json_data = {
                     "title": paper_content.metadata.get("title", "Unknown"),
                     "authors": paper_content.metadata.get("author", "Unknown"),
@@ -895,7 +865,11 @@ def show_analysis_interface():
                     use_container_width=True
                 )
     else:
-        st.info(f"No analysis of type '{current_type}' available yet. Click 'Analyze Paper' to generate one.")
+        # Check if analyses are still running
+        if st.session_state.analyses_running:
+            st.info("Analyses are currently running in the background. Results will appear here shortly...")
+        else:
+            st.info(f"No analysis of type '{current_type}' available yet. Click 'Analyze Paper' to generate one.")
 
 
 def show_library_interface():
@@ -925,16 +899,6 @@ def configure_sidebar():
     *Need an API key?* [Get one here](https://aistudio.google.com/app/apikey)
     """)
     
-    # Add debug info when in debug mode
-    if UI_SETTINGS.get("show_debug_info", False):
-        st.sidebar.markdown("### Debug Info")
-        st.sidebar.write("Session State Keys:", list(st.session_state.keys()))
-        st.sidebar.write("Current Tab Index:", st.session_state.tab_index)
-        st.sidebar.write("Switch to Analysis:", st.session_state.get("switch_to_analysis", False))
-        st.sidebar.write("Last Upload ID:", st.session_state.get("last_upload_id", None))
-        st.sidebar.write("File Uploaded:", st.session_state.get("file_uploaded", False))
-        st.sidebar.write("Paper Content:", "Valid" if st.session_state.paper_content else "None")
-    
     # Add option to reset
     if st.sidebar.button("Reset Session", use_container_width=True):
         # Clear all session state
@@ -956,26 +920,24 @@ def main():
     
     # Create tabs for app navigation with explicit tab index tracking
     tab_options = ["📄 Import Paper", "🔍 Analysis", "📚 Library"]
-    tab_index = st.session_state.tab_index
     
     # Create the tabs with the correct active tab
     tabs = st.tabs(tab_options)
     
     # Handle content for each tab
-    with tabs[0]:
-        show_import_interface()
-        
-    with tabs[1]:
-        show_analysis_interface()
+    with tabs[st.session_state.tab_index]:
+        if st.session_state.tab_index == 0:
+            show_import_interface()
+        elif st.session_state.tab_index == 1:
+            show_analysis_interface()
+        elif st.session_state.tab_index == 2:
+            show_library_interface()
     
-    with tabs[2]:
-        show_library_interface()
-    
-    # Update tab index in session state if needed
-    if "tab" in st.query_params:
-        current_tab_index = tab_options.index(st.query_params.get("tab", [tab_options[0]])[0])
-        if current_tab_index != tab_index:
-            st.session_state.tab_index = current_tab_index
+    # Update tab index if user clicks a different tab
+    for i, tab in enumerate(tabs):
+        with tab:
+            st.session_state.tab_index = i
+            break
 
 if __name__ == "__main__":
     main()

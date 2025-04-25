@@ -7,7 +7,7 @@ import arxiv
 import fitz  # PyMuPDF
 from PIL import Image
 import io
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
 # Set up logging
@@ -74,60 +74,6 @@ def extract_text_from_pdf(doc) -> Dict[str, str]:
     }
 
 
-def fix_metadata_from_text(metadata: Dict[str, Any], text_data: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Attempt to fix missing or incorrect metadata using extracted text
-    
-    Args:
-        metadata: Current metadata dictionary
-        text_data: Extracted text data
-        
-    Returns:
-        Updated metadata dictionary
-    """
-    # Check if title needs fixing
-    title = metadata.get("title", "").strip()
-    if not title or title == "Unknown Title" or title.replace("-", "").isdigit() or len(title) < 5:
-        # Try to extract title from first page text
-        first_page_lines = text_data.get("first_page_text", "").strip().split('\n')
-        
-        # Look for a suitable title candidate (non-empty line with reasonable length)
-        for line in first_page_lines:
-            line = line.strip()
-            if line and 5 <= len(line) <= 200 and not line.replace("-", "").isdigit():
-                # Skip lines that are likely not titles (emails, URLs, etc.)
-                if '@' in line or 'http' in line or line.count(' ') < 2:
-                    continue
-                    
-                metadata["title"] = line
-                break
-    
-    # Extract abstract if not present
-    if "abstract" not in metadata or not metadata["abstract"]:
-        full_text = text_data.get("full_text", "")
-        abstract_candidates = []
-        
-        # Look for abstract section markers
-        abstract_markers = ["abstract", "summary", "overview"]
-        lower_text = full_text.lower()
-        
-        for marker in abstract_markers:
-            if marker in lower_text:
-                # Find potential abstract text after marker
-                start_idx = lower_text.find(marker) + len(marker)
-                end_idx = min(start_idx + 1500, len(lower_text))  # Limit abstract length
-                
-                # Extract text chunk that might contain abstract
-                chunk = full_text[start_idx:end_idx].strip()
-                abstract_candidates.append(chunk)
-        
-        # Use the shortest candidate as it's more likely to be just the abstract
-        if abstract_candidates:
-            metadata["abstract"] = min(abstract_candidates, key=len)
-    
-    return metadata
-
-
 def load_pdf_from_path(pdf_path: str) -> PaperContent:
     """
     Load a PDF from a file path and extract pages as images and metadata.
@@ -154,15 +100,14 @@ def load_pdf_from_path(pdf_path: str) -> PaperContent:
             "filename": os.path.basename(pdf_path)
         }
         
-        # Extract text content
+        # We'll let the AI model extract/enhance metadata rather than using regex
+        # Just store the text for now
         text_data = extract_text_from_pdf(doc)
-        
-        # Try to fix metadata using extracted text
-        metadata = fix_metadata_from_text(metadata, text_data)
+        metadata["first_page_text"] = text_data["first_page_text"]
         
         # Extract pages as images with optimized resolution
         page_images = []
-        resolution = 150  # DPI for images - lower than before for better performance
+        resolution = 150  # DPI for images
         
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
@@ -241,9 +186,6 @@ def load_pdf_from_arxiv(arxiv_id: str) -> PaperContent:
         
         # Update with arXiv metadata (taking precedence over PDF metadata)
         paper_content.metadata.update(arxiv_metadata)
-        
-        # Clean up temporary files when done (but keep the PDF path reference)
-        # We'll clean up the files later after processing
         
         return paper_content
         
@@ -328,7 +270,7 @@ def load_pdf_from_url(url: str) -> PaperContent:
 
 def get_embedded_pdf_viewer(paper_content: PaperContent, height: int = 800) -> Optional[str]:
     """
-    Generate HTML for an embedded PDF viewer
+    Generate HTML for an embedded PDF viewer with improved zoom and page settings
     
     Args:
         paper_content: PaperContent object
@@ -343,14 +285,16 @@ def get_embedded_pdf_viewer(paper_content: PaperContent, height: int = 800) -> O
         return None
         
     # Create an iframe with the PDF viewer
+    # Using URL parameters to set initial view:
+    # - page=1 - start on first page
+    # - zoom=125 - set zoom to 125%
+    # - view=FitH - fit to width
     pdf_display = f"""
     <div style="display: flex; justify-content: center; width: 100%;">
         <iframe 
-            src="data:application/pdf;base64,{base64_pdf}" 
+            src="data:application/pdf;base64,{base64_pdf}#page=1&zoom=125&view=FitH" 
             width="100%" 
             height="{height}px" 
-            page="1" 
-            view="FitH"
             style="border: none; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
         </iframe>
     </div>

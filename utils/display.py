@@ -1,6 +1,6 @@
 import streamlit as st
 import re
-from typing import Dict, List, Tuple, Any, Optional, Union
+from typing import Dict, List, Tuple, Any, Optional
 from datetime import datetime
 import time
 
@@ -75,15 +75,12 @@ def rating_badge(rating: int, tooltip: Optional[str] = None):
     if rating <= 3:
         color = "#ff6347"  # Tomato (low)
         bg_color = "rgba(255, 99, 71, 0.2)"
-        label = "Low"
     elif rating <= 6:
         color = "#ffa500"  # Orange (medium)
         bg_color = "rgba(255, 165, 0, 0.2)"
-        label = "Medium"
     else:
         color = "#228b22"  # Forest Green (high)
         bg_color = "rgba(34, 139, 34, 0.2)"
-        label = "High"
     
     # Create badge HTML
     tooltip_attr = f'title="{tooltip}"' if tooltip else ''
@@ -164,129 +161,6 @@ def display_paper_card(title: str, authors: str, date: Optional[str] = None, pre
         )
 
 
-def render_definitions_grid(definitions: Dict[str, Dict[str, str]], columns: int = 3):
-    """
-    Render terminology definitions in a grid layout
-    
-    Args:
-        definitions: Dictionary of terminology definitions
-        columns: Number of columns in the grid
-    """
-    if not definitions:
-        st.info("No terminology definitions available yet.")
-        return
-    
-    # Create columns
-    cols = st.columns(columns)
-    
-    # Distribute definitions across columns
-    for i, (term, info) in enumerate(definitions.items()):
-        with cols[i % columns]:
-            with st.expander(term):
-                st.markdown(f"**Definition:** {info.get('definition', 'No definition available')}")
-                
-                if 'explanation' in info:
-                    st.markdown(f"**Simplified:** {info.get('explanation')}")
-
-
-def create_progress_bar(total_steps: int = 5, key_prefix: str = ""):
-    """
-    Create a progress bar with container
-    
-    Args:
-        total_steps: Total number of steps
-        key_prefix: Prefix for widget keys
-        
-    Returns:
-        Tuple of (container, progress_bar, status_text)
-    """
-    container = st.empty()
-    
-    with container.container():
-        progress_bar = st.progress(0, key=f"{key_prefix}progress")
-        status_text = st.empty()
-    
-    return container, progress_bar, status_text
-
-
-def update_progress(progress_bar, status_text, message: str, current_step: int, total_steps: int):
-    """
-    Update progress bar and status
-    
-    Args:
-        progress_bar: Progress bar widget
-        status_text: Status text container
-        message: Status message
-        current_step: Current step number
-        total_steps: Total number of steps
-    """
-    progress_value = min(current_step / total_steps, 1.0)
-    progress_bar.progress(progress_value)
-    status_text.info(message)
-
-
-def create_embedded_pdf_viewer(pdf_base64: str, height: int = 800) -> str:
-    """
-    Create HTML for an embedded PDF viewer
-    
-    Args:
-        pdf_base64: Base64-encoded PDF data
-        height: Viewer height in pixels
-        
-    Returns:
-        HTML string for the PDF viewer
-    """
-    return f"""
-    <div style="display: flex; justify-content: center; width: 100%;">
-        <iframe 
-            src="data:application/pdf;base64,{pdf_base64}" 
-            width="100%" 
-            height="{height}px" 
-            style="border: none; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
-        </iframe>
-    </div>
-    """
-
-
-def truncate_text(text: str, max_length: int = 200) -> str:
-    """
-    Truncate text with ellipsis
-    
-    Args:
-        text: Text to truncate
-        max_length: Maximum length before truncation
-        
-    Returns:
-        Truncated text
-    """
-    if not text or len(text) <= max_length:
-        return text
-        
-    return text[:max_length] + "..."
-
-
-def create_tabbed_view(tabs_content: Dict[str, Any], default_index: int = 0):
-    """
-    Create a tabbed view with named tabs
-    
-    Args:
-        tabs_content: Dictionary of tab_label: content_function pairs
-        default_index: Default tab index to open
-    """
-    if not tabs_content:
-        return
-        
-    # Create tabs
-    tabs = st.tabs(list(tabs_content.keys()))
-    
-    # Display content in each tab
-    for i, (_, content_func) in enumerate(tabs_content.items()):
-        with tabs[i]:
-            if callable(content_func):
-                content_func()
-            else:
-                st.markdown(str(content_func))
-
 def display_terminology(terminology):
     """Display terminology definitions in cards"""
     if not terminology:
@@ -331,7 +205,7 @@ class ProgressManager:
     def _create_elements(self):
         """Create progress elements"""
         with self.container.container():
-            self.progress_bar = st.progress(0, key=f"{self.key_prefix}progress")
+            self.progress_bar = st.progress(0)
             self.status_text = st.empty()
     
     def update(self, message, step=None):

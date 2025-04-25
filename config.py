@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -52,6 +52,13 @@ MODEL_DEFINITIONS = {
         "description": "Extracts key terminology and definitions",
         "temperature": 0.1,
         "max_output_tokens": 2048
+    },
+    "metadata": {
+        "name": "Metadata Extractor",
+        "model": "gemini-1.5-flash",
+        "description": "Extracts paper metadata",
+        "temperature": 0.1,
+        "max_output_tokens": 1024
     }
 }
 
@@ -68,7 +75,8 @@ ANALYSIS_TYPES = {
         "top_p": 0.95,
         "top_k": 40,
         "max_pages": 15,
-        "try_pdf_input": True
+        "try_pdf_input": True,
+        "auto_analyze": True
     },
     "quick_summary": {
         "title": "Quick Summary",
@@ -81,7 +89,8 @@ ANALYSIS_TYPES = {
         "top_p": 0.95,
         "top_k": 40,
         "max_pages": 8,
-        "try_pdf_input": True
+        "try_pdf_input": True,
+        "auto_analyze": True
     },
     "technical": {
         "title": "Technical Deep Dive",
@@ -94,7 +103,8 @@ ANALYSIS_TYPES = {
         "top_p": 0.95,
         "top_k": 40,
         "max_pages": 15,
-        "try_pdf_input": True
+        "try_pdf_input": True,
+        "auto_analyze": True
     },
     "practical": {
         "title": "Practical Applications",
@@ -107,7 +117,8 @@ ANALYSIS_TYPES = {
         "top_p": 0.95,
         "top_k": 40,
         "max_pages": 12,
-        "try_pdf_input": True
+        "try_pdf_input": True,
+        "auto_analyze": True
     },
     "simplified": {
         "title": "Explain Like I'm 5",
@@ -120,18 +131,27 @@ ANALYSIS_TYPES = {
         "top_p": 0.95,
         "top_k": 40,
         "max_pages": 10,
-        "try_pdf_input": True
+        "try_pdf_input": True,
+        "auto_analyze": False  # Not part of initial auto-analysis
     },
     # Utility analysis types
     "field_tags": {
         "model": "field_tags",
         "temperature": 0.1,
-        "max_output_tokens": 1024
+        "max_output_tokens": 1024,
+        "auto_analyze": True
     },
     "terminology": {
         "model": "terminology",
         "temperature": 0.1,
-        "max_output_tokens": 2048
+        "max_output_tokens": 2048,
+        "auto_analyze": True
+    },
+    "metadata": {
+        "model": "metadata",
+        "temperature": 0.1,
+        "max_output_tokens": 1024,
+        "auto_analyze": True
     }
 }
 
@@ -142,6 +162,8 @@ UI_SETTINGS = {
     "default_analysis_type": "comprehensive",
     "default_model": "default",
     "auto_extract_definitions": True,
+    "auto_switch_to_analysis": True,  # Auto-switch to analysis tab after loading paper
+    "auto_run_analysis": True,        # Auto-run analysis after loading paper
     "progress_timeout": 120
 }
 
@@ -240,10 +262,6 @@ CUSTOM_CSS = """
 </style>
 """
 
-# Cache directory settings
-CACHE_DIR = os.getenv("CACHE_DIR", "cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
-
 def get_api_key(user_api_key: Optional[str] = None) -> str:
     """
     Get API key, prioritizing user-provided key
@@ -289,7 +307,7 @@ def get_analysis_types() -> Dict[str, Dict[str, Any]]:
         Dictionary of analysis types
     """
     return {k: v for k, v in ANALYSIS_TYPES.items() 
-            if k not in ["field_tags", "terminology"]}
+            if k not in ["field_tags", "terminology", "metadata"]}
 
 
 def get_models() -> Dict[str, Dict[str, Any]]:
@@ -301,3 +319,17 @@ def get_models() -> Dict[str, Dict[str, Any]]:
     """
     return {k: v for k, v in MODEL_DEFINITIONS.items() 
             if k in ["default", "pro", "alternate", "fallback"]}
+
+
+def get_auto_analysis_types() -> List[str]:
+    """
+    Get analysis types that should run automatically on paper load
+    
+    Returns:
+        List of analysis type keys to auto-run
+    """
+    if not UI_SETTINGS.get("auto_run_analysis", True):
+        return []
+        
+    return [k for k, v in ANALYSIS_TYPES.items() 
+            if v.get("auto_analyze", False)]

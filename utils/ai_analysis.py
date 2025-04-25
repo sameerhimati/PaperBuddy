@@ -13,6 +13,7 @@ from google.genai import types
 
 # Config imports
 from config import get_model_config, get_api_key
+from utils.prompts import get_prompt
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -58,23 +59,6 @@ def create_genai_client(api_key: Optional[str] = None) -> genai.Client:
         raise ValueError("No API key available. Please provide a valid API key.")
         
     return genai.Client(api_key=key)
-
-
-def safe_json_loads(json_str: str) -> Dict[str, Any]:
-    """
-    Safely parse JSON string with better error handling
-    
-    Args:
-        json_str: JSON string to parse
-        
-    Returns:
-        Parsed JSON object or empty dict if parsing fails
-    """
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON parse error: {str(e)}")
-        return {}
 
 
 def extract_structured_data(response_text: str) -> Dict[str, Any]:
@@ -296,34 +280,10 @@ def analyze_terminology(
         client = create_genai_client(api_key)
         config = get_model_config("terminology")
         
-        # Create terminology extraction prompt
+        # Get prompt from the prompts module
         title = metadata.get("title", "Unknown Title")
         authors = metadata.get("author", "Unknown Author")
-        
-        prompt = f"""
-        You are analyzing an academic paper to extract key terminology and concepts.
-        
-        Paper Title: {title}
-        Authors: {authors}
-        
-        I'm showing you images of this paper. Extract 5-10 key technical terms, concepts or methods that are important for understanding this paper.
-        
-        For each term, provide:
-        1. A formal definition (as it would appear in a textbook)
-        2. A simplified explanation for non-experts
-        
-        FORMAT YOUR RESPONSE AS JSON ONLY:
-        {{
-          "Term Name": {{
-            "definition": "Formal/technical definition",
-            "explanation": "Simpler explanation for non-experts"
-          }},
-          "Another Term": {{
-            "definition": "Formal/technical definition",
-            "explanation": "Simpler explanation for non-experts"
-          }}
-        }}
-        """
+        prompt = get_prompt("terminology", metadata)
         
         # Prepare image content
         contents = [prompt]
@@ -371,6 +331,59 @@ def analyze_terminology(
         return {}
 
 
+def get_field_tags(
+    title: str,
+    abstract: str,
+    api_key: Optional[str] = None
+) -> Dict[str, Dict[str, str]]:
+    """
+    Get field tags for paper based on title and abstract
+    
+    Args:
+        title: Paper title
+        abstract: Paper abstract
+        api_key: Optional API key
+        
+    Returns:
+        Dictionary of field tags with descriptions and links
+    """
+    # Skip if title or abstract are too short
+    if len(title) < 5 or len(abstract) < 20:
+        return {}
+    
+    try:
+        # Get client and config
+        client = create_genai_client(api_key)
+        config = get_model_config("field_tags")
+        
+        # Get prompt from the prompts module
+        metadata = {"title": title, "abstract": abstract}
+        prompt = get_prompt("field_tags", metadata)
+        
+        # Generate content with a lightweight model
+        generation_config = types.GenerateContentConfig(
+            max_output_tokens=1024,
+            temperature=0.1,  # Lower temperature for more reliable JSON
+            top_p=0.95,
+            top_k=40
+        )
+        
+        response = client.models.generate_content(
+            model=config.get("model"),
+            contents=prompt,
+            config=generation_config
+        )
+        
+        # Extract structured data from response
+        field_tags = extract_structured_data(response.text)
+        
+        return field_tags
+            
+    except Exception as e:
+        logger.error(f"Error getting field tags: {str(e)}")
+        return {}
+
+
 def analyze_paper(
     page_images: List[Image.Image],
     metadata: Dict[str, Any],
@@ -406,156 +419,8 @@ def analyze_paper(
         # Get model configuration
         config = get_model_config(analysis_type)
         
-        # Create appropriate prompt for analysis type
-        title = metadata.get("title", "Unknown Title")
-        authors = metadata.get("author", "Unknown Author")
-        
-        # Simplified base prompt for better analysis quality
-        base_prompt = f"""
-        You are an expert academic researcher analyzing a research paper.
-        
-        Paper Title: {title}
-        Authors: {authors}
-        
-        I'm showing you images of this paper. Please analyze the content carefully, 
-        focusing on text, figures, tables, and equations.
-        
-        IMPORTANT GUIDELINES:
-        1. Be objective and critically evaluate the work - NOT all papers make significant contributions
-        2. Use the FULL range of the 1-10 scale for ratings:
-           - 1-3: Below average contributions/approaches
-           - 4-6: Average quality for the field
-           - 7-8: Good contributions, but not revolutionary
-           - 9-10: Exceptional, field-changing work (rare)
-        3. Support ALL ratings with specific evidence from the paper
-        4. Identify at least 2-3 SPECIFIC limitations or weaknesses
-        5. Format all ratings as: Rating: X/10 - followed by justification
-        """
-        
-        # Add analysis-specific instructions
-        if analysis_type == "comprehensive":
-            prompt = f"""{base_prompt}
-            
-            REQUIRED OUTPUT FORMAT:
-            SUMMARY
-            [A concise 3-5 sentence summary]
-            
-            KEY INNOVATIONS (Rate novelty X/10)
-            * [Key innovation 1]
-            * [Key innovation 2]
-            ...
-            
-            TECHNIQUES (Rate technical quality X/10)
-            * [Technique 1]
-            * [Technique 2]
-            ...
-            
-            PRACTICAL VALUE (Rate practicality X/10)
-            * [Application point 1]
-            * [Application point 2]
-            ...
-            
-            LIMITATIONS
-            * [Limitation 1]
-            * [Limitation 2]
-            ...
-            """
-        elif analysis_type == "quick_summary":
-            prompt = f"""{base_prompt}
-            
-            Provide a quick overview of this paper for a busy reader:
-            
-            1. Give a single paragraph (3-5 sentences) summarizing the paper's core contribution and significance.
-            
-            2. Provide 5 bullet points:
-               - The specific problem addressed
-               - The key innovation introduced (Rate novelty X/10)
-               - The main results/findings
-               - The most significant limitation
-               - The most promising application
-            
-            Be concise but specific. The entire summary should be readable in under 1 minute.
-            """
-        elif analysis_type == "technical":
-            prompt = f"""{base_prompt}
-            
-            Provide a detailed technical analysis focusing on methods, algorithms, and implementation:
-            
-            CORE ALGORITHMS & METHODS (Rate technical sophistication X/10)
-            * [Describe each algorithm in technical detail]
-            * [Include pseudocode or equations if present]
-            
-            IMPLEMENTATION DETAILS
-            * [Architectural details]
-            * [Training procedures/hyperparameters]
-            * [Data processing pipeline]
-            
-            TECHNICAL EVALUATION & RESULTS
-            * [Benchmarking methodology]
-            * [Performance metrics and their significance]
-            * [Ablation studies or component analyses]
-            
-            TECHNICAL LIMITATIONS
-            * [Mathematical or theoretical limitations]
-            * [Implementation constraints]
-            * [Evaluation gaps]
-            
-            This analysis should provide enough detail for replication or adaptation of the methods.
-            """
-        elif analysis_type == "practical":
-            prompt = f"""{base_prompt}
-            
-            Focus exclusively on the real-world applications and practical implementation:
-            
-            INDUSTRY RELEVANCE (Rate commercial potential X/10)
-            * [Specific industries or domains that could apply this]
-            * [Real-world problems it addresses]
-            
-            IMPLEMENTATION REQUIREMENTS
-            * [Hardware/software requirements]
-            * [Data and computational resources needed]
-            * [Expertise required]
-            
-            COMPARISON TO ALTERNATIVES
-            * [How this approach compares to existing solutions]
-            * [Tradeoffs (speed, accuracy, cost, etc.)]
-            
-            ADOPTION ROADMAP
-            * [Steps needed for production implementation]
-            * [Potential challenges and solutions]
-            * [Timeline for practical adoption]
-            
-            LIMITATIONS FOR PRACTICAL USE
-            * [Specific barriers to real-world adoption]
-            * [Missing components for production readiness]
-            """
-        elif analysis_type == "simplified":
-            prompt = f"""
-            You are explaining a complex research paper to someone with no technical background in this field.
-            
-            Paper Title: {title}
-            Authors: {authors}
-            
-            I'm showing you images of this paper. Create a simplified explanation that:
-            
-            1. Explains what problem the research solves in everyday terms
-            2. Why this matters in the real world with concrete examples
-            3. The main idea of the solution using analogies and simple concepts
-            4. How this might benefit people in practical terms
-            5. Any limitations in simple terms
-            
-            Rules:
-            - Use NO technical jargon without explaining it
-            - Write at an 8th grade reading level
-            - Use everyday analogies and metaphors
-            - Keep your explanation under 500 words total
-            
-            Start with "This paper is about..." and focus on making the core ideas accessible to anyone.
-            """
-        else:
-            # Default to comprehensive for unknown types
-            analysis_type = "comprehensive"
-            prompt = base_prompt  # Use default instructions
+        # Get prompt from the prompts module
+        prompt = get_prompt(analysis_type, metadata, simplified=simplified)
         
         # Prepare image content
         contents = [prompt]
@@ -674,84 +539,13 @@ def analyze_paper(
         )
 
 
-def get_field_tags(
-    title: str,
-    abstract: str,
-    api_key: Optional[str] = None
-) -> Dict[str, Dict[str, str]]:
-    """
-    Get field tags for paper based on title and abstract
-    
-    Args:
-        title: Paper title
-        abstract: Paper abstract
-        api_key: Optional API key
-        
-    Returns:
-        Dictionary of field tags with descriptions and links
-    """
-    # Skip if title or abstract are too short
-    if len(title) < 5 or len(abstract) < 20:
-        return {}
-    
-    try:
-        # Get client and config
-        client = create_genai_client(api_key)
-        config = get_model_config("field_tags")
-        
-        # Create field tags prompt
-        prompt = f"""
-        Based on this paper title and abstract, identify 2-4 main research fields or subfields.
-        Return ONLY a JSON object with field names as keys, where each field has a short description and link.
-        
-        Title: {title}
-        Abstract: {abstract[:500]}  # Using first 500 chars for brevity
-        
-        Example response:
-        {{
-          "Computer Vision": {{
-            "description": "Field focused on enabling computers to derive information from images",
-            "link": "https://en.wikipedia.org/wiki/Computer_vision"
-          }},
-          "Deep Learning": {{
-            "description": "Machine learning approach using neural networks with many layers",
-            "link": "https://en.wikipedia.org/wiki/Deep_learning"
-          }}
-        }}
-        
-        IMPORTANT: Respond with JSON ONLY, no extra text.
-        """
-        
-        # Generate content with a lightweight model
-        generation_config = types.GenerateContentConfig(
-            max_output_tokens=1024,
-            temperature=0.1,  # Lower temperature for more reliable JSON
-            top_p=0.95,
-            top_k=40
-        )
-        
-        response = client.models.generate_content(
-            model=config.get("model"),
-            contents=prompt,
-            config=generation_config
-        )
-        
-        # Extract structured data from response
-        field_tags = extract_structured_data(response.text)
-        
-        return field_tags
-            
-    except Exception as e:
-        logger.error(f"Error getting field tags: {str(e)}")
-        return {}
-
-
 def process_paper_with_parallel_analysis(
     page_images: List[Image.Image],
     metadata: Dict[str, Any],
     api_key: Optional[str] = None,
-    pdf_bytes: Optional[bytes] = None
-) -> Dict[str, AnalysisResult]:
+    pdf_bytes: Optional[bytes] = None,
+    analysis_types: List[str] = ["comprehensive", "quick_summary", "technical", "practical"]
+) -> Dict[str, Any]:
     """
     Process paper with parallel analysis tasks
     
@@ -760,14 +554,14 @@ def process_paper_with_parallel_analysis(
         metadata: Paper metadata
         api_key: Optional API key
         pdf_bytes: Optional PDF bytes
+        analysis_types: List of analysis types to run
         
     Returns:
-        Dictionary of analysis results by type
+        Dictionary of analysis results and metadata
     """
     # Define tasks to run in parallel
     tasks = {
         "terminology": lambda: analyze_terminology(page_images, metadata, api_key),
-        "comprehensive": lambda: analyze_paper(page_images, metadata, "comprehensive", api_key, pdf_bytes),
         "field_tags": lambda: get_field_tags(
             metadata.get("title", ""), 
             metadata.get("abstract", ""),
@@ -775,10 +569,16 @@ def process_paper_with_parallel_analysis(
         )
     }
     
+    # Add requested analysis types
+    for analysis_type in analysis_types:
+        tasks[analysis_type] = lambda type=analysis_type: analyze_paper(
+            page_images, metadata, type, api_key, pdf_bytes
+        )
+    
     results = {}
     
     # Run tasks in parallel with a thread pool
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         # Submit all tasks
         future_to_task = {
             executor.submit(task_func): task_name 
@@ -793,7 +593,7 @@ def process_paper_with_parallel_analysis(
                 results[task_name] = task_result
             except Exception as e:
                 logger.error(f"Task {task_name} generated an exception: {str(e)}")
-                if task_name == "comprehensive":
+                if task_name in analysis_types:
                     # For analysis tasks, create an error result
                     results[task_name] = AnalysisResult(
                         analysis_type=task_name,
@@ -804,6 +604,6 @@ def process_paper_with_parallel_analysis(
                     )
                 else:
                     # For other tasks, store an empty result
-                    results[task_name] = {} if task_name == "terminology" or task_name == "field_tags" else None
+                    results[task_name] = {} if task_name in ["terminology", "field_tags"] else None
     
     return results

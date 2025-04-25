@@ -2,7 +2,7 @@
 Prompt templates for different analysis types in PaperBuddy
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 # Base template for all paper analysis
 BASE_ANALYSIS_TEMPLATE = """
@@ -154,6 +154,24 @@ Rules:
 Start with "This paper is about..." and focus on making the core ideas accessible to anyone.
 """
 
+# Metadata extraction prompt
+METADATA_EXTRACTION_PROMPT = """
+You're analyzing the first page of a research paper. Please extract the following metadata:
+
+1. Title: The full title of the paper
+2. Authors: All authors listed, separated by commas
+3. Abstract: The paper's abstract or summary
+
+If any information is missing or unclear, indicate this with "Unknown".
+
+FORMAT YOUR RESPONSE AS JSON ONLY:
+{
+  "title": "Full paper title",
+  "author": "Author 1, Author 2, ...",
+  "abstract": "The paper's abstract..."
+}
+"""
+
 # Terminology extraction prompt
 TERMINOLOGY_PROMPT = """
 You are analyzing an academic paper to extract key terminology and concepts.
@@ -203,73 +221,14 @@ Example response:
 IMPORTANT: Respond with JSON ONLY, no extra text.
 """
 
-# Citation format prompt
-PAPER_CITATION_PROMPT = """
-Create a proper academic citation for this paper in the following formats:
-1. APA
-2. MLA
-3. Chicago
-4. BibTeX
-
-Paper Title: {title}
-Authors: {authors}
-Year: {year}
-URL: {url}
-DOI: {doi}
-
-FORMAT YOUR RESPONSE AS JSON ONLY:
-{{
-  "APA": "Complete APA citation",
-  "MLA": "Complete MLA citation",
-  "Chicago": "Complete Chicago citation",
-  "BibTeX": "Complete BibTeX citation"
-}}
-"""
-
-# Paper comparison prompt
-PAPER_COMPARISON_PROMPT = """
-You are analyzing the relationship between two academic papers.
-
-Paper 1:
-Title: {title1}
-Authors: {authors1}
-
-Paper 2:
-Title: {title2}
-Authors: {authors2}
-
-Compare these papers on the following dimensions:
-1. Core approaches and methodologies
-2. Contributions and innovations
-3. Performance and results
-4. Strengths and limitations
-5. How Paper 2 builds upon or differs from Paper 1
-
-FORMAT YOUR ANALYSIS USING THESE HEADINGS:
-RELATIONSHIP SUMMARY
-[Brief overview of how these papers relate]
-
-METHODOLOGICAL COMPARISON
-[Comparison of approaches]
-
-KEY DIFFERENCES
-[Main differences in contributions]
-
-EVOLUTIONARY PROGRESS
-[How the field advanced between these papers]
-
-COMBINED INSIGHTS
-[What insights we gain from considering both papers together]
-"""
-
-# Q&A prompt
+# Paper Q&A prompt
 PAPER_QA_PROMPT = """
 You are an expert who has deeply read and understood this academic paper.
 
 Paper Title: {title}
 Authors: {authors}
 
-Based on the paper content, provide a detailed and accurate answer to the following question:
+Based on the paper content, please answer the following question:
 
 QUESTION: {question}
 
@@ -279,10 +238,20 @@ In your answer:
 3. Be objective and accurate based only on what's in the paper
 4. Note any limitations or uncertainties in the paper related to this question
 5. If the paper doesn't address the question, clearly state this rather than speculate
-
-ANSWER:
 """
 
+# Prompt mapping
+PROMPT_MAPPING = {
+    "comprehensive": COMPREHENSIVE_ANALYSIS_PROMPT,
+    "quick_summary": QUICK_SUMMARY_PROMPT,
+    "technical": TECHNICAL_DEEP_DIVE_PROMPT,
+    "practical": PRACTICAL_APPLICATIONS_PROMPT,
+    "simplified": SIMPLIFIED_PROMPT,
+    "metadata": METADATA_EXTRACTION_PROMPT,
+    "terminology": TERMINOLOGY_PROMPT,
+    "field_tags": FIELD_TAGS_PROMPT,
+    "qa": PAPER_QA_PROMPT
+}
 
 def get_prompt(prompt_type: str, metadata: Dict[str, Any], **kwargs) -> str:
     """
@@ -296,56 +265,38 @@ def get_prompt(prompt_type: str, metadata: Dict[str, Any], **kwargs) -> str:
     Returns:
         Formatted prompt string
     """
+    # Get basic metadata with fallbacks
     title = metadata.get("title", "Unknown Title")
     authors = metadata.get("author", "Unknown Authors")
     abstract = metadata.get("abstract", "")[:500]  # Limit abstract length
     
     # Handle simplified override
-    if kwargs.get("simplified", False) or prompt_type == "simplified":
-        return SIMPLIFIED_PROMPT.format(title=title, authors=authors)
+    if kwargs.get("simplified", False):
+        prompt_type = "simplified"
     
-    # Base template with metadata
-    base = BASE_ANALYSIS_TEMPLATE.format(title=title, authors=authors)
-    
-    # Select appropriate template based on analysis type
-    if prompt_type == "comprehensive":
-        return COMPREHENSIVE_ANALYSIS_PROMPT.format(base_template=base)
-    elif prompt_type == "quick_summary":
-        return QUICK_SUMMARY_PROMPT.format(base_template=base)
-    elif prompt_type == "technical":
-        return TECHNICAL_DEEP_DIVE_PROMPT.format(base_template=base)
-    elif prompt_type == "practical":
-        return PRACTICAL_APPLICATIONS_PROMPT.format(base_template=base)
-    elif prompt_type == "terminology":
-        return TERMINOLOGY_PROMPT.format(title=title, authors=authors)
-    elif prompt_type == "field_tags":
-        return FIELD_TAGS_PROMPT.format(title=title, abstract=abstract)
-    elif prompt_type == "citation":
-        return PAPER_CITATION_PROMPT.format(
-            title=title,
-            authors=authors,
-            year=metadata.get("year", kwargs.get("year", "Unknown")),
-            url=metadata.get("url", kwargs.get("url", "")),
-            doi=metadata.get("doi", kwargs.get("doi", ""))
-        )
-    elif prompt_type == "comparison":
-        # For paper comparison prompt
-        return PAPER_COMPARISON_PROMPT.format(
-            title1=title,
-            authors1=authors,
-            title2=kwargs.get("title2", "Unknown Title"),
-            authors2=kwargs.get("authors2", "Unknown Authors")
-        )
-    elif prompt_type == "qa":
-        # For paper Q&A prompt
-        return PAPER_QA_PROMPT.format(
-            title=title,
-            authors=authors,
-            question=kwargs.get("question", "What is the main contribution of this paper?")
-        )
+    # Get prompt template
+    if prompt_type in PROMPT_MAPPING:
+        template = PROMPT_MAPPING[prompt_type]
     else:
         # Default to comprehensive for unknown types
-        return COMPREHENSIVE_ANALYSIS_PROMPT.format(base_template=base)
+        template = COMPREHENSIVE_ANALYSIS_PROMPT
+    
+    # Format with base template if needed
+    if "{base_template}" in template:
+        base = BASE_ANALYSIS_TEMPLATE.format(title=title, authors=authors)
+        prompt = template.format(base_template=base)
+    else:
+        # Handle special case formats
+        if prompt_type == "field_tags":
+            prompt = template.format(title=title, abstract=abstract)
+        elif prompt_type == "qa":
+            question = kwargs.get("question", "What is the main contribution of this paper?")
+            prompt = template.format(title=title, authors=authors, question=question)
+        else:
+            # Standard formatting
+            prompt = template.format(title=title, authors=authors)
+    
+    return prompt
 
 
 def get_section_markers(analysis_type: str) -> Dict[str, str]:
@@ -378,13 +329,6 @@ def get_section_markers(analysis_type: str) -> Dict[str, str]:
             "comparison": "COMPARISON TO ALTERNATIVES",
             "roadmap": "ADOPTION ROADMAP",
             "limitations": "LIMITATIONS FOR PRACTICAL USE"
-        },
-        "comparison": {
-            "summary": "RELATIONSHIP SUMMARY",
-            "methodological": "METHODOLOGICAL COMPARISON",
-            "differences": "KEY DIFFERENCES",
-            "evolution": "EVOLUTIONARY PROGRESS",
-            "insights": "COMBINED INSIGHTS"
         }
     }
     
