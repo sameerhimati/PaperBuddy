@@ -59,6 +59,9 @@ def initialize_session_state():
         "model_choice": UI_SETTINGS["default_model"],
         "processing": False,
         "progress_status": {},
+        "last_action": None,
+        "paper_processed": False,
+        "terminology_paper_id": None,
         "field_tags": {},
         "terminology_loaded": False,
         "last_upload_id": None,  # Track the last uploaded file by ID
@@ -686,54 +689,22 @@ def run_paper_analysis():
         progress.complete(False, f"Error during analysis: {str(e)}")
         return None
 
-
-# 1. First, let's modify how we track state with a more explicit approach
-# Add these to initialize_session_state function
-
-def initialize_session_state():
-    """Initialize session state variables if they don't exist"""
-    defaults = {
-        "paper_content": None,
-        "analysis_results": {},
-        "current_analysis_type": UI_SETTINGS["default_analysis_type"],
-        "user_api_key": None,
-        "model_choice": UI_SETTINGS["default_model"],
-        "processing": False,
-        "progress_status": {},
-        "field_tags": {},
-        "terminology_loaded": False,
-        "last_upload_id": None,  # Track the last uploaded file by ID
-        "tab_index": 0,
-        "switch_to_analysis": False,  # Flag to explicitly handle tab switching
-        "file_uploaded": False  # Flag to track if a file has been uploaded
-    }
-    
-    for key, default_value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = default_value
-            
-    # Ensure nested structure in analysis_results exists
-    if "terminology" not in st.session_state.analysis_results:
-        st.session_state.analysis_results["terminology"] = {}
-
-
 def show_import_interface():
     """Show paper import interface"""
     st.markdown("## Import Paper")
     
     # Check for tab switching request
     if st.session_state.switch_to_analysis and st.session_state.paper_content:
-        st.session_state.tab_index = 1
+        st.session_state.tab_index = 1  # Switch to Analysis tab
         st.session_state.switch_to_analysis = False
-        # No st.rerun() here - let Streamlit handle the tab switching naturally
+        st.rerun()  # Force rerun to apply tab change
     
     # Tab-based input method selection
     tab1, tab2, tab3 = st.tabs(["Upload PDF", "arXiv ID", "PDF URL"])
     
     with tab1:
-        # The key problem is with file_uploader - adding a key parameter helps stabilize
         uploaded_file = st.file_uploader("Upload a PDF paper", type=["pdf"], 
-                                         key=f"pdf_uploader_{st.session_state.file_uploaded}")
+                                         key=f"pdf_uploader_{st.session_state.get('file_uploader_key', 0)}")
         
         if uploaded_file is not None:
             # Generate a unique file identifier based on filename and size
@@ -745,7 +716,6 @@ def show_import_interface():
                 
                 # Clear previous state
                 st.session_state.paper_content = None
-                st.session_state.switch_to_analysis = False
                 
                 # Process the file
                 paper_content = process_paper_upload(uploaded_file)
@@ -765,18 +735,13 @@ def show_import_interface():
         fetch_button = st.button("Fetch Paper", key="fetch_arxiv", use_container_width=True)
         
         if arxiv_id and fetch_button:
-            # Generate a unique ID based on arxiv_id
-            file_id = f"arxiv_{arxiv_id}"
-            
-            # Only process if this is a new file
-            if file_id != st.session_state.last_upload_id:
-                st.session_state.last_upload_id = file_id
-                
-                # Process the arXiv ID
+            # Process the arXiv ID
+            with st.spinner(f"Fetching paper with arXiv ID: {arxiv_id}..."):
                 paper_content = process_arxiv_import(arxiv_id)
                 
                 if paper_content and paper_content.is_valid:
                     st.session_state.paper_content = paper_content
+                    st.session_state.last_upload_id = f"arxiv_{arxiv_id}"
                     st.session_state.switch_to_analysis = True
                     
                     # Add a message to confirm loading
@@ -789,18 +754,13 @@ def show_import_interface():
         url_button = st.button("Fetch Paper", key="fetch_url", use_container_width=True)
         
         if pdf_url and url_button:
-            # Generate a unique ID based on URL
-            file_id = f"url_{pdf_url}"
-            
-            # Only process if this is a new URL
-            if file_id != st.session_state.last_upload_id:
-                st.session_state.last_upload_id = file_id
-                
-                # Process the URL
+            # Process the URL
+            with st.spinner(f"Fetching paper from URL: {pdf_url}..."):
                 paper_content = process_url_import(pdf_url)
                 
                 if paper_content and paper_content.is_valid:
                     st.session_state.paper_content = paper_content
+                    st.session_state.last_upload_id = f"url_{pdf_url}"
                     st.session_state.switch_to_analysis = True
                     
                     # Add a message to confirm loading

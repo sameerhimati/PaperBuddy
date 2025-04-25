@@ -349,6 +349,8 @@ def get_embedded_pdf_viewer(paper_content: PaperContent, height: int = 800) -> O
             src="data:application/pdf;base64,{base64_pdf}" 
             width="100%" 
             height="{height}px" 
+            page="1" 
+            view="FitH"
             style="border: none; box-shadow: 0 2px 5px rgba(0,0,0,0.2);">
         </iframe>
     </div>
