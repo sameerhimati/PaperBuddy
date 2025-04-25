@@ -9,9 +9,6 @@ from datetime import datetime
 import concurrent.futures
 from PIL import Image
 import io
-import threading
-terminology_results = None
-terminology_lock = threading.Lock()
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -64,7 +61,10 @@ def initialize_session_state():
         "progress_status": {},
         "field_tags": {},
         "terminology_loaded": False,
-        "tab_index": 0
+        "last_upload_id": None,  # Track the last uploaded file by ID
+        "tab_index": 0,
+        "switch_to_analysis": False,  # Flag to explicitly handle tab switching
+        "file_uploaded": False  # Flag to track if a file has been uploaded
     }
     
     for key, default_value in defaults.items():
@@ -451,7 +451,7 @@ def process_paper_upload(uploaded_file):
         
         progress.update("Extracting terminology...", step=4)
         
-        # Extract terminology synchronously
+        # Extract terminology only once for this paper
         try:
             api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
             terminology = analyze_terminology(
@@ -484,10 +484,18 @@ def process_paper_upload(uploaded_file):
 
 def process_arxiv_import(arxiv_id):
     """Process arXiv import"""
+    # Check if we're in a rerun after processing this arxiv ID
+    if st.session_state.last_action == f"arxiv_{arxiv_id}" and st.session_state.paper_processed:
+        return st.session_state.paper_content
+        
     progress = ProgressManager(total_steps=4, key_prefix="arxiv")
     progress.update("Validating arXiv ID...", step=1)
     
     try:
+        # Mark that we're processing this action
+        st.session_state.last_action = f"arxiv_{arxiv_id}"
+        st.session_state.paper_processed = False
+        
         # Validate arXiv ID format
         arxiv_id = arxiv_id.strip()
         if not (arxiv_id.isdigit() or 
@@ -505,131 +513,8 @@ def process_arxiv_import(arxiv_id):
         
         progress.update("Extracting research fields...", step=3)
         
-        # Field tags should already be in the arXiv metadata
-        title = paper_content.metadata.get('title', '')
-        abstract = paper_content.metadata.get('abstract', '')
-        
-        if len(title) > 5 and len(abstract) > 20:
-            st.session_state.field_tags = get_field_tags(
-                title, 
-                abstract,
-                st.session_state.user_api_key if 'user_api_key' in st.session_state else None
-            )
-        
-        progress.update("Extracting terminology...", step=4)
-        
-        # Extract terminology synchronously
-        try:
-            api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
-            terminology = analyze_terminology(
-                paper_content.page_images[:min(3, len(paper_content.page_images))],
-                paper_content.metadata,
-                api_key
-            )
-            
-            if terminology:
-                st.session_state.analysis_results["terminology"] = terminology
-                st.session_state.terminology_loaded = True
-        except Exception as e:
-            print(f"Error extracting terminology: {str(e)}")
-        
-        progress.complete(True, "Paper loaded successfully!")
-        
-        return paper_content
-        
-    except Exception as e:
-        progress.complete(False, f"Error processing arXiv paper: {str(e)}")
-        return None
-
-
-# In process_paper_upload function, replace the threading code with this:
-
-def process_paper_upload(uploaded_file):
-    """Process uploaded PDF file"""
-    progress = ProgressManager(total_steps=4, key_prefix="upload")
-    progress.update("Uploading PDF...", step=1)
-    
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-            tmp.write(uploaded_file.read())
-            tmp_path = tmp.name
-        
-        progress.update("Loading and processing PDF...", step=2)
-        
-        paper_content = load_pdf_from_path(tmp_path)
-        if not paper_content.is_valid:
-            progress.complete(False, f"Error loading PDF: {paper_content.error}")
-            return None
-        
-        progress.update("Extracting research fields...", step=3)
-        
-        # Extract field tags
-        title = paper_content.metadata.get('title', '')
-        abstract = paper_content.metadata.get('abstract', '')
-        
-        if len(title) > 5 and len(abstract) > 20:
-            st.session_state.field_tags = get_field_tags(
-                title, 
-                abstract,
-                st.session_state.user_api_key if 'user_api_key' in st.session_state else None
-            )
-        
-        progress.update("Extracting terminology...", step=4)
-        
-        # Extract terminology synchronously
-        try:
-            api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
-            terminology = analyze_terminology(
-                paper_content.page_images[:min(3, len(paper_content.page_images))],
-                paper_content.metadata,
-                api_key
-            )
-            
-            if terminology:
-                st.session_state.analysis_results["terminology"] = terminology
-                st.session_state.terminology_loaded = True
-        except Exception as e:
-            print(f"Error extracting terminology: {str(e)}")
-        
-        progress.complete(True, "Paper loaded successfully!")
-        
-        return paper_content
-        
-    except Exception as e:
-        progress.complete(False, f"Error processing PDF: {str(e)}")
-        return None
-    finally:
-        # Clean up the temporary file
-        try:
-            if 'tmp_path' in locals() and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except Exception as e:
-            print(f"Failed to clean up temporary file: {str(e)}")
-
-# Similarly, replace threading code in process_arxiv_import:
-
-def process_arxiv_import(arxiv_id):
-    """Process arXiv import"""
-    progress = ProgressManager(total_steps=4, key_prefix="arxiv")
-    progress.update("Validating arXiv ID...", step=1)
-    
-    try:
-        # Validate arXiv ID format
-        arxiv_id = arxiv_id.strip()
-        if not (arxiv_id.isdigit() or 
-                (arxiv_id.replace('.', '').isdigit()) or
-                ('.' in arxiv_id and arxiv_id.split('.')[0].isdigit() and arxiv_id.split('.')[1].isdigit())):
-            progress.complete(False, "Invalid arXiv ID format")
-            return None
-        
-        progress.update("Fetching paper from arXiv...", step=2)
-        
-        paper_content = load_pdf_from_arxiv(arxiv_id)
-        if not paper_content.is_valid:
-            progress.complete(False, f"Error loading paper from arXiv: {paper_content.error}")
-            return None
-        
-        progress.update("Extracting research fields...", step=3)
+        # Generate a unique ID for this paper
+        paper_id = f"{paper_content.metadata.get('title', '')}_{paper_content.metadata.get('author', '')}"
         
         # Field tags should already be in the arXiv metadata
         title = paper_content.metadata.get('title', '')
@@ -644,37 +529,48 @@ def process_arxiv_import(arxiv_id):
         
         progress.update("Extracting terminology...", step=4)
         
-        # Extract terminology synchronously
-        try:
-            api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
-            terminology = analyze_terminology(
-                paper_content.page_images[:min(3, len(paper_content.page_images))],
-                paper_content.metadata,
-                api_key
-            )
-            
-            if terminology:
-                st.session_state.analysis_results["terminology"] = terminology
-                st.session_state.terminology_loaded = True
-        except Exception as e:
-            print(f"Error extracting terminology: {str(e)}")
+        # Only extract terminology if it's a different paper than before
+        if st.session_state.terminology_paper_id != paper_id:
+            try:
+                api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
+                terminology = analyze_terminology(
+                    paper_content.page_images[:min(3, len(paper_content.page_images))],
+                    paper_content.metadata,
+                    api_key
+                )
+                
+                if terminology:
+                    st.session_state.analysis_results["terminology"] = terminology
+                    st.session_state.terminology_loaded = True
+                    st.session_state.terminology_paper_id = paper_id
+            except Exception as e:
+                print(f"Error extracting terminology: {str(e)}")
         
         progress.complete(True, "Paper loaded successfully!")
+        
+        # Mark that we've successfully processed this paper
+        st.session_state.paper_processed = True
         
         return paper_content
         
     except Exception as e:
         progress.complete(False, f"Error processing arXiv paper: {str(e)}")
         return None
-
-# And finally, replace threading code in process_url_import:
 
 def process_url_import(url):
     """Process URL import"""
+    # Check if we're in a rerun after processing this URL
+    if st.session_state.last_action == f"url_{url}" and st.session_state.paper_processed:
+        return st.session_state.paper_content
+        
     progress = ProgressManager(total_steps=4, key_prefix="url")
     progress.update("Validating URL...", step=1)
     
     try:
+        # Mark that we're processing this action
+        st.session_state.last_action = f"url_{url}"
+        st.session_state.paper_processed = False
+        
         # Very basic URL validation
         url = url.strip()
         if not (url.startswith('http://') or url.startswith('https://')) or '.pdf' not in url.lower():
@@ -690,6 +586,9 @@ def process_url_import(url):
         
         progress.update("Extracting research fields...", step=3)
         
+        # Generate a unique ID for this paper
+        paper_id = f"{paper_content.metadata.get('title', '')}_{paper_content.metadata.get('author', '')}"
+        
         # Extract field tags
         title = paper_content.metadata.get('title', '')
         abstract = paper_content.metadata.get('abstract', '')
@@ -703,22 +602,27 @@ def process_url_import(url):
         
         progress.update("Extracting terminology...", step=4)
         
-        # Extract terminology synchronously
-        try:
-            api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
-            terminology = analyze_terminology(
-                paper_content.page_images[:min(3, len(paper_content.page_images))],
-                paper_content.metadata,
-                api_key
-            )
-
-            if terminology:
-                st.session_state.analysis_results["terminology"] = terminology
-                st.session_state.terminology_loaded = True
-        except Exception as e:
-            print(f"Error extracting terminology: {str(e)}")
+        # Only extract terminology if it's a different paper than before
+        if st.session_state.terminology_paper_id != paper_id:
+            try:
+                api_key = st.session_state.user_api_key if 'user_api_key' in st.session_state else None
+                terminology = analyze_terminology(
+                    paper_content.page_images[:min(3, len(paper_content.page_images))],
+                    paper_content.metadata,
+                    api_key
+                )
+                
+                if terminology:
+                    st.session_state.analysis_results["terminology"] = terminology
+                    st.session_state.terminology_loaded = True
+                    st.session_state.terminology_paper_id = paper_id
+            except Exception as e:
+                print(f"Error extracting terminology: {str(e)}")
         
         progress.complete(True, "Paper loaded successfully!")
+        
+        # Mark that we've successfully processed this paper
+        st.session_state.paper_processed = True
         
         return paper_content
         
@@ -783,48 +687,126 @@ def run_paper_analysis():
         return None
 
 
+# 1. First, let's modify how we track state with a more explicit approach
+# Add these to initialize_session_state function
+
+def initialize_session_state():
+    """Initialize session state variables if they don't exist"""
+    defaults = {
+        "paper_content": None,
+        "analysis_results": {},
+        "current_analysis_type": UI_SETTINGS["default_analysis_type"],
+        "user_api_key": None,
+        "model_choice": UI_SETTINGS["default_model"],
+        "processing": False,
+        "progress_status": {},
+        "field_tags": {},
+        "terminology_loaded": False,
+        "last_upload_id": None,  # Track the last uploaded file by ID
+        "tab_index": 0,
+        "switch_to_analysis": False,  # Flag to explicitly handle tab switching
+        "file_uploaded": False  # Flag to track if a file has been uploaded
+    }
+    
+    for key, default_value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = default_value
+            
+    # Ensure nested structure in analysis_results exists
+    if "terminology" not in st.session_state.analysis_results:
+        st.session_state.analysis_results["terminology"] = {}
+
+
 def show_import_interface():
     """Show paper import interface"""
     st.markdown("## Import Paper")
+    
+    # Check for tab switching request
+    if st.session_state.switch_to_analysis and st.session_state.paper_content:
+        st.session_state.tab_index = 1
+        st.session_state.switch_to_analysis = False
+        # No st.rerun() here - let Streamlit handle the tab switching naturally
     
     # Tab-based input method selection
     tab1, tab2, tab3 = st.tabs(["Upload PDF", "arXiv ID", "PDF URL"])
     
     with tab1:
-        uploaded_file = st.file_uploader("Upload a PDF paper", type=["pdf"])
+        # The key problem is with file_uploader - adding a key parameter helps stabilize
+        uploaded_file = st.file_uploader("Upload a PDF paper", type=["pdf"], 
+                                         key=f"pdf_uploader_{st.session_state.file_uploaded}")
         
         if uploaded_file is not None:
-            paper_content = process_paper_upload(uploaded_file)
-            if paper_content and paper_content.is_valid:
-                st.session_state.paper_content = paper_content
-                # Switch to Analysis tab
-                st.session_state.tab_index = 1
-                st.rerun()
+            # Generate a unique file identifier based on filename and size
+            file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+            
+            # Only process if this is a new file or first time seeing it
+            if file_id != st.session_state.last_upload_id:
+                st.session_state.last_upload_id = file_id
+                
+                # Clear previous state
+                st.session_state.paper_content = None
+                st.session_state.switch_to_analysis = False
+                
+                # Process the file
+                paper_content = process_paper_upload(uploaded_file)
+                
+                if paper_content and paper_content.is_valid:
+                    st.session_state.paper_content = paper_content
+                    st.session_state.file_uploaded = True
+                    st.session_state.switch_to_analysis = True
+                    
+                    # Add a message to confirm loading
+                    st.success("Paper loaded successfully! Switching to Analysis tab...")
+                    # Force a rerun to apply the state changes
+                    st.rerun()
     
     with tab2:
         arxiv_id = st.text_input("Enter arXiv ID (e.g., 2303.08774)", placeholder="2303.08774")
         fetch_button = st.button("Fetch Paper", key="fetch_arxiv", use_container_width=True)
         
         if arxiv_id and fetch_button:
-            paper_content = process_arxiv_import(arxiv_id)
-            if paper_content and paper_content.is_valid:
-                st.session_state.paper_content = paper_content
-                # Switch to Analysis tab
-                st.session_state.tab_index = 1
-                st.rerun()
+            # Generate a unique ID based on arxiv_id
+            file_id = f"arxiv_{arxiv_id}"
+            
+            # Only process if this is a new file
+            if file_id != st.session_state.last_upload_id:
+                st.session_state.last_upload_id = file_id
+                
+                # Process the arXiv ID
+                paper_content = process_arxiv_import(arxiv_id)
+                
+                if paper_content and paper_content.is_valid:
+                    st.session_state.paper_content = paper_content
+                    st.session_state.switch_to_analysis = True
+                    
+                    # Add a message to confirm loading
+                    st.success("Paper loaded successfully! Switching to Analysis tab...")
+                    # Force a rerun to apply the state changes
+                    st.rerun()
     
     with tab3:
         pdf_url = st.text_input("Enter PDF URL", placeholder="https://example.com/paper.pdf")
         url_button = st.button("Fetch Paper", key="fetch_url", use_container_width=True)
         
         if pdf_url and url_button:
-            paper_content = process_url_import(pdf_url)
-            if paper_content and paper_content.is_valid:
-                st.session_state.paper_content = paper_content
-                # Switch to Analysis tab
-                st.session_state.tab_index = 1
-                st.rerun()
-
+            # Generate a unique ID based on URL
+            file_id = f"url_{pdf_url}"
+            
+            # Only process if this is a new URL
+            if file_id != st.session_state.last_upload_id:
+                st.session_state.last_upload_id = file_id
+                
+                # Process the URL
+                paper_content = process_url_import(pdf_url)
+                
+                if paper_content and paper_content.is_valid:
+                    st.session_state.paper_content = paper_content
+                    st.session_state.switch_to_analysis = True
+                    
+                    # Add a message to confirm loading
+                    st.success("Paper loaded successfully! Switching to Analysis tab...")
+                    # Force a rerun to apply the state changes
+                    st.rerun()
 
 def show_analysis_interface():
     """Show paper analysis interface"""
@@ -833,6 +815,10 @@ def show_analysis_interface():
     if not paper_content or not paper_content.is_valid:
         st.info("Please import a paper first using the Import Paper tab.")
         return
+    
+    # Add debug message to check if we're reaching this point
+    if UI_SETTINGS.get("show_debug_info", False):
+        st.write("DEBUG: Analysis tab reached with valid paper content")
     
     # Display paper metadata
     display_paper_metadata(paper_content)
@@ -979,6 +965,16 @@ def configure_sidebar():
     *Need an API key?* [Get one here](https://aistudio.google.com/app/apikey)
     """)
     
+    # Add debug info when in debug mode
+    if UI_SETTINGS.get("show_debug_info", False):
+        st.sidebar.markdown("### Debug Info")
+        st.sidebar.write("Session State Keys:", list(st.session_state.keys()))
+        st.sidebar.write("Current Tab Index:", st.session_state.tab_index)
+        st.sidebar.write("Switch to Analysis:", st.session_state.get("switch_to_analysis", False))
+        st.sidebar.write("Last Upload ID:", st.session_state.get("last_upload_id", None))
+        st.sidebar.write("File Uploaded:", st.session_state.get("file_uploaded", False))
+        st.sidebar.write("Paper Content:", "Valid" if st.session_state.paper_content else "None")
+    
     # Add option to reset
     if st.sidebar.button("Reset Session", use_container_width=True):
         # Clear all session state
@@ -998,9 +994,11 @@ def main():
     # Configure sidebar
     configure_sidebar()
     
-    # Create tabs for app navigation
+    # Create tabs for app navigation with explicit tab index tracking
     tab_options = ["📄 Import Paper", "🔍 Analysis", "📚 Library"]
     tab_index = st.session_state.tab_index
+    
+    # Create the tabs with the correct active tab
     tabs = st.tabs(tab_options)
     
     # Handle content for each tab
@@ -1012,22 +1010,12 @@ def main():
     
     with tabs[2]:
         show_library_interface()
-        
     
-    # Update tab index in session state if changed via UI
-    query_params = st.query_params
-    current_tab_index = tab_options.index(query_params.get("tab", [tab_options[0]])[0])
-    if current_tab_index != tab_index:
-        st.session_state.tab_index = current_tab_index
-
-    global terminology_results
-    if terminology_results is not None:
-        with terminology_lock:
-            if terminology_results:
-                st.session_state.analysis_results["terminology"] = terminology_results
-                st.session_state.terminology_loaded = True
-            terminology_results = None
-
+    # Update tab index in session state if needed
+    if "tab" in st.query_params:
+        current_tab_index = tab_options.index(st.query_params.get("tab", [tab_options[0]])[0])
+        if current_tab_index != tab_index:
+            st.session_state.tab_index = current_tab_index
 
 if __name__ == "__main__":
     main()
